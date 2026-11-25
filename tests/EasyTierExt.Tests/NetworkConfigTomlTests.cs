@@ -42,7 +42,7 @@ public class NetworkConfigTomlTests
         Assert.True(NetworkConfigToml.EnsureGenerated(p));
 
         Assert.Equal("EasyTier_With_Extension", NetworkConfigToml.GetDeviceName(p.ConfigToml));
-        Assert.Contains("bind_device = true\nuse_smoltcp = true", p.ConfigToml);
+        Assert.Contains("bind_device = true\nuse_smoltcp = true\nenable_udp_broadcast_relay = true", p.ConfigToml);
         var v = NetworkConfigToml.Read(p.ConfigToml);
         Assert.True(v.Dhcp);
         Assert.True(v.GameCompat);
@@ -143,6 +143,13 @@ public class NetworkConfigTomlTests
         Assert.True(NetworkConfigToml.EnsureGenerated(p));
         Assert.Contains("use_smoltcp = true", p.ConfigToml);
         Assert.Contains("bind_device = true", p.ConfigToml);
+        Assert.Contains("enable_udp_broadcast_relay = true", p.ConfigToml);
+
+        // 手动关闭的广播转发不会被重新打开
+        var noRelay = new NetworkProfile { ConfigToml = "[flags]\nenable_udp_broadcast_relay = false\n" };
+        NetworkConfigToml.EnsureGenerated(noRelay);
+        Assert.Contains("enable_udp_broadcast_relay = false", noRelay.ConfigToml);
+        Assert.DoesNotContain("enable_udp_broadcast_relay = true", noRelay.ConfigToml);
 
         var off = NetworkConfigToml.Apply(p.ConfigToml, NetworkConfigToml.Read(p.ConfigToml) with { GameCompat = false });
         NetworkConfigToml.Store(p, off);

@@ -16,6 +16,7 @@
   - 内置 **GitHub 在线更新**（`0511150/Easytier_Extension`）：启动时后台检查最新 GitHub Release，发现新版本后在标题栏与设置页提示，支持一键下载更新包（自动复用 GitHub 下载加速前缀并校验 `SHA256`）、覆盖替换并重启客户端。
 - **高级设置**：直接编辑该网络的 EasyTier config（TOML），与普通设置双向同步，保存时由核心校验；可在 [配置助手](https://easytier.cn/assistant/) 中调整配置后粘贴。旧版的子网代理、监听地址、加密、MTU 等设置会自动迁移到 config 中。
 - **TUN 网卡名称**：固定默认为 `EasyTier_With_Extension`；多个网络同时运行时，后启动的自动追加 `_2`、`_3`。
+- **UDP 广播转发**：默认开启（`enable_udp_broadcast_relay`），将本机 UDP 广播转发给其他节点，帮助局域网游戏发现房间；可在高级设置中改为 `false`。
 - **核心运行日志**：页面最底部实时展示当前选中网络实例的 `easytier-core.exe` 输出日志。
 
 ### 3. 系统托盘与进程守护

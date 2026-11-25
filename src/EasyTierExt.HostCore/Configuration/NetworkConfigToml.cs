@@ -40,6 +40,9 @@ public sealed record NetworkFormValues
 public static class NetworkConfigToml
 {
     public const string TunDeviceName = "EasyTier_With_Extension";
+    /// <summary>未写明时默认开启的核心选项：绑定物理网卡、用户态网络栈、转发本机 UDP 广播（局域网游戏发现房间）。</summary>
+    private static readonly string[] DefaultOnFlags = ["bind_device", "use_smoltcp", "enable_udp_broadcast_relay"];
+
     public const string AssistantUrl = "https://easytier.cn/assistant/";
 
     /// <summary>静态地址未写掩码时按 /24 处理（核心会将其视为 /32）。</summary>
@@ -114,7 +117,7 @@ public static class NetworkConfigToml
         else doc.Remove("flags", key);
     }
 
-    /// <summary>补全未写明的客户端默认项：网卡名称、联机兼容、绑定物理网卡；已写明的取值不变。</summary>
+    /// <summary>补全未写明的客户端默认项：网卡名称与 DefaultOnFlags；已写明的取值不变。</summary>
     public static string EnsureDefaults(string toml)
     {
         var doc = new TomlDocumentEditor(toml);
@@ -122,7 +125,7 @@ public static class NetworkConfigToml
         {
             doc.Set("flags", "dev_name", TomlDocumentEditor.Quote(TunDeviceName));
         }
-        foreach (var key in new[] { "bind_device", "use_smoltcp" })
+        foreach (var key in DefaultOnFlags)
         {
             if (!doc.Contains("flags", key)) doc.Set("flags", key, "true");
         }
@@ -239,7 +242,8 @@ public static class NetworkConfigToml
             if (parts.Length == 2) sb.Append($"mapped_cidr = {Q(parts[1])}\n");
         }
 
-        sb.Append($"\n[flags]\ndev_name = {Q(TunDeviceName)}\nbind_device = true\nuse_smoltcp = true\n");
+        sb.Append($"\n[flags]\ndev_name = {Q(TunDeviceName)}\n");
+        foreach (var flag in DefaultOnFlags) sb.Append($"{flag} = true\n");
         if (LegacyBool(legacy, "disable_encryption"))
             sb.Append("enable_encryption = false\n");
         else if (LegacyString(legacy, "encryption_algorithm") is { Length: > 0 } alg && alg != "aes-gcm")
