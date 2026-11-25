@@ -1,0 +1,9 @@
+dist/
+[Bb]in/
+[Oo]bj/
+.vs/
+*.user
+*.suo
+_registry_repo/
+Easytier_Extension_Registry/
+*.tmp

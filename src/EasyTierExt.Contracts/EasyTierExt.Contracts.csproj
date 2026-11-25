@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>EasyTierExt.Contracts</AssemblyName>
+    <RootNamespace>EasyTierExt.Contracts</RootNamespace>
+  </PropertyGroup>
+</Project>

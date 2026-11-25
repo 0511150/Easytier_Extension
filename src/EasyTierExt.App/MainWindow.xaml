@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="EasyTierExt.App.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="EasyTier with Extension">
+
+  <Grid x:Name="RootGrid" Background="#141416">
+    <Grid.ColumnDefinitions>
+      <ColumnDefinition Width="236" />
+      <ColumnDefinition Width="*" />
+    </Grid.ColumnDefinitions>
+
+    <!-- Left 3-Tier Navigation Sidebar -->
+    <Grid Grid.Column="0" Background="#1B1B1E" BorderBrush="#28282E" BorderThickness="0,0,1,0">
+      <Grid.RowDefinitions>
+        <RowDefinition Height="56" />
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="*" />
+      </Grid.RowDefinitions>
+
+      <!-- Branding Header -->
+      <StackPanel Grid.Row="0" VerticalAlignment="Center" Padding="18,10,14,6">
+        <TextBlock Text="EasyTier" FontSize="16" FontWeight="SemiBold" Foreground="#F3F4F6" />
+        <TextBlock Text="with Extension" FontSize="11" Foreground="#8E929F" Margin="0,-2,0,0" />
+      </StackPanel>
+
+      <Border Grid.Row="1" Height="1" Background="#28282E" Margin="12,0" />
+
+      <!-- Tier 1: EasyTier Core Menus -->
+      <StackPanel x:Name="CoreMenuPanel" Grid.Row="2" Spacing="4" Padding="10,12,10,12">
+        <TextBlock Text="EASYTIER 核心" FontSize="10.5" FontWeight="SemiBold" Foreground="#6B7280" Margin="8,0,0,4" />
+      </StackPanel>
+
+      <Border Grid.Row="3" Height="1" Background="#28282E" Margin="12,0" />
+
+      <!-- Tier 2: Plugin Marketplace -->
+      <StackPanel x:Name="MarketMenuPanel" Grid.Row="4" Spacing="4" Padding="10,10,10,10" />
+
+      <Border Grid.Row="4" Height="1" Background="#28282E" Margin="12,0" VerticalAlignment="Bottom" />
+
+      <!-- Tier 3: Dynamic Plugin Menus -->
+      <ScrollViewer Grid.Row="5" VerticalScrollBarVisibility="Auto" Padding="10,10,10,12">
+        <StackPanel x:Name="PluginMenuPanel" Spacing="4">
+          <TextBlock Text="扩展插件" FontSize="10.5" FontWeight="SemiBold" Foreground="#6B7280" Margin="8,0,0,4" />
+        </StackPanel>
+      </ScrollViewer>
+    </Grid>
+
+    <!-- Right Area: TitleBar + Content -->
+    <Grid Grid.Column="1">
+      <Grid.RowDefinitions>
+        <RowDefinition Height="46" />
+        <RowDefinition Height="*" />
+      </Grid.RowDefinitions>
+
+      <!-- Top Custom TitleBar -->
+      <Grid Grid.Row="0" Background="#161619" BorderBrush="#28282E" BorderThickness="0,0,0,1">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="Auto" />
+          <ColumnDefinition Width="Auto" />
+          <ColumnDefinition Width="*" />
+          <ColumnDefinition Width="140" />
+        </Grid.ColumnDefinitions>
+
+        <TextBlock x:Name="PageTitleText" Grid.Column="0" Text="网络概览"
+                   FontSize="14.5" FontWeight="SemiBold" Foreground="#F3F4F6"
+                   VerticalAlignment="Center" Margin="20,0,12,0" />
+
+        <Border x:Name="StatusPill" Grid.Column="1" Background="#232329" CornerRadius="10"
+                Padding="10,4" VerticalAlignment="Center">
+          <StackPanel Orientation="Horizontal" Spacing="6">
+            <Ellipse x:Name="StatusDot" Width="8" Height="8" Fill="#6B7280" VerticalAlignment="Center" />
+            <TextBlock x:Name="StatusPillText" Text="在线网络: 0" FontSize="12" Foreground="#D1D5DB" />
+          </StackPanel>
+        </Border>
+
+        <Grid x:Name="DragTitleRegion" Grid.Column="2" Background="Transparent" />
+      </Grid>
+
+      <!-- Main Dynamic Content Host -->
+      <Grid x:Name="ContentHost" Grid.Row="1" Padding="20" Background="#141416" />
+    </Grid>
+  </Grid>
+</Window>

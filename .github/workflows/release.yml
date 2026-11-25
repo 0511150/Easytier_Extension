@@ -1,0 +1,70 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag name (e.g. v1.0.0)'
+        required: false
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    env:
+      EASYTIER_CORE_VERSION: 'v2.6.4'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+          include-prerelease: true
+
+      - name: Download EasyTier Core (${{ env.EASYTIER_CORE_VERSION }})
+        shell: pwsh
+        run: |
+          $url = "https://github.com/EasyTier/EasyTier/releases/download/$env:EASYTIER_CORE_VERSION/easytier-windows-x86_64-$env:EASYTIER_CORE_VERSION.zip"
+          $zip = Join-Path $env:RUNNER_TEMP "easytier-core.zip"
+          $coreDir = Join-Path $env:RUNNER_TEMP "easytier-core"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $coreDir -Force
+          $inner = Get-ChildItem -Path $coreDir -Directory | Select-Object -First 1
+          if ($inner -and (Test-Path (Join-Path $inner.FullName "easytier-core.exe"))) {
+            $corePath = $inner.FullName
+          } else {
+            $corePath = $coreDir
+          }
+          "EASYTIER_CORE_SRC=$corePath" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Build, Package and Run Tests
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build-dist.ps1
+
+      - name: Prepare Release Assets
+        shell: pwsh
+        run: |
+          $tag = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } elseif ('${{ inputs.tag }}') { '${{ inputs.tag }}' } else { 'v1.0.0' }
+          $releaseDir = Join-Path $env:RUNNER_TEMP "release-assets"
+          New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
+          $clientZip = Join-Path $releaseDir "EasyTierWithExtension-win-x64-$tag.zip"
+          Compress-Archive -Path "dist\*" -DestinationPath $clientZip -Force
+          Copy-Item "dist\market\screen-share-*.zip" $releaseDir -Force
+          "RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "RELEASE_DIR=$releaseDir" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: |
+            ${{ env.RELEASE_DIR }}/*.zip
+          generate_release_notes: true

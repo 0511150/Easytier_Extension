@@ -1,0 +1,14 @@
+{
+  "id": "screen-share",
+  "name": "屏幕共享",
+  "version": "1.0.0",
+  "author": "EasyTier Extension",
+  "description": "基于 EasyTier 虚拟局域网的低延迟多人屏幕共享、系统音频同步与远程键鼠协助插件",
+  "icon": "🖥️",
+  "category": "远程协作",
+  "min_host_version": "1.0.0",
+  "entry": "ScreenShare.exe",
+  "menus": [
+    { "id": "main", "title": "屏幕共享 - 桌面共享" }
+  ]
+}
