@@ -15,6 +15,7 @@ public sealed class EasyTierManager : IAsyncDisposable
 {
     private readonly string _coreExePath;
     private readonly string _cliExePath;
+    private readonly string _runtimeConfigDir;
     private readonly JobObjectManager _jobObject;
     private readonly ConcurrentDictionary<string, RunningInstance> _instances = new();
     private readonly ConcurrentDictionary<string, Queue<string>> _logs = new();
@@ -26,11 +27,12 @@ public sealed class EasyTierManager : IAsyncDisposable
     public event Action<string, List<HostPeerInfo>>? PeersUpdated;
     public event Action<string, string>? LogAppended;
 
-    public EasyTierManager(string baseDirectory, JobObjectManager jobObject, string? coreDirOverride = null)
+    public EasyTierManager(string baseDirectory, JobObjectManager jobObject, string? coreDirOverride = null, string? dataRootDirectory = null)
     {
         var coreDir = coreDirOverride ?? Path.Combine(baseDirectory, "core");
         _coreExePath = Path.Combine(coreDir, "easytier-core.exe");
         _cliExePath = Path.Combine(coreDir, "easytier-cli.exe");
+        _runtimeConfigDir = Path.Combine(dataRootDirectory ?? baseDirectory, "config", "networks");
         _jobObject = jobObject;
     }
 
@@ -111,8 +113,12 @@ public sealed class EasyTierManager : IAsyncDisposable
 
         await StopNetworkAsync(profile.NetworkId, allProfilesProvider);
 
+        NetworkConfigToml.EnsureGenerated(profile);
         var rpcPort = AllocateFreeTcpPort();
-        var args = BuildCoreArguments(profile, rpcPort);
+        var devName = NetworkConfigToml.MakeUniqueDeviceName(
+            NetworkConfigToml.GetDeviceName(profile.ConfigToml),
+            [.. _instances.Values.Select(i => i.DevName)]);
+        var configPath = WriteRuntimeConfig(profile);
         var psi = new ProcessStartInfo
         {
             FileName = _coreExePath,
@@ -124,10 +130,14 @@ public sealed class EasyTierManager : IAsyncDisposable
             StandardErrorEncoding = Encoding.UTF8,
             WorkingDirectory = Path.GetDirectoryName(_coreExePath)!
         };
-        foreach (var a in args)
-        {
-            psi.ArgumentList.Add(a);
-        }
+        psi.ArgumentList.Add("-c");
+        psi.ArgumentList.Add(configPath);
+        psi.ArgumentList.Add("-r");
+        psi.ArgumentList.Add($"127.0.0.1:{rpcPort}");
+        psi.ArgumentList.Add("--dev-name");
+        psi.ArgumentList.Add(devName);
+        // 密钥等取值可能包含 $，不做环境变量展开
+        psi.ArgumentList.Add("--disable-env-parsing");
 
         var proc = new Process { StartInfo = psi, EnableRaisingEvents = true };
         if (!proc.Start())
@@ -138,10 +148,10 @@ public sealed class EasyTierManager : IAsyncDisposable
         _jobObject.AssignProcess(proc);
 
         var cts = new CancellationTokenSource();
-        var inst = new RunningInstance(profile, proc, rpcPort, cts);
+        var inst = new RunningInstance(profile, proc, rpcPort, devName, cts);
         _instances[profile.NetworkId] = inst;
 
-        AppendLog(profile.NetworkId, $"[Host] 启动实例 {profile.DisplayName} (RPC 127.0.0.1:{rpcPort}, PID={proc.Id})");
+        AppendLog(profile.NetworkId, $"[Host] 启动实例 {profile.DisplayName} (网卡 {devName}, RPC 127.0.0.1:{rpcPort}, PID={proc.Id})");
 
         proc.OutputDataReceived += (_, e) =>
         {
@@ -175,6 +185,8 @@ public sealed class EasyTierManager : IAsyncDisposable
 
     public async Task StopNetworkAsync(string networkId, Func<IReadOnlyList<NetworkProfile>> allProfilesProvider)
     {
+        // 核心只在启动时读取该文件，停止后不把密钥留在磁盘上
+        DeleteRuntimeConfig(networkId);
         if (!_instances.TryRemove(networkId, out var inst))
         {
             return;
@@ -351,112 +363,57 @@ public sealed class EasyTierManager : IAsyncDisposable
         return proc.ExitCode == 0 ? output : null;
     }
 
-    private static List<string> BuildCoreArguments(NetworkProfile p, int rpcPort)
+    private string WriteRuntimeConfig(NetworkProfile profile)
     {
-        var args = new List<string>
-        {
-            "--instance-name", p.NetworkId,
-            "--network-name", p.NetworkName,
-            "--network-secret", p.NetworkSecret,
-            "-r", $"127.0.0.1:{rpcPort}"
-        };
-
-        if (!string.IsNullOrWhiteSpace(p.Hostname))
-        {
-            args.Add("--hostname");
-            args.Add(p.Hostname);
-        }
-
-        if (p.NoTun)
-        {
-            args.Add("--no-tun");
-        }
-        else if (string.Equals(p.Ipv4Mode, "static", StringComparison.OrdinalIgnoreCase) &&
-                 !string.IsNullOrWhiteSpace(p.StaticIpv4))
-        {
-            args.Add("-i");
-            args.Add(p.StaticIpv4.Trim());
-        }
-        else
-        {
-            args.Add("-d");
-        }
-
-        if (string.Equals(p.ConnectionMode, "public", StringComparison.OrdinalIgnoreCase) &&
-            !string.IsNullOrWhiteSpace(p.PublicServer))
-        {
-            args.Add("-p");
-            args.Add(p.PublicServer.Trim());
-        }
-        else if (string.Equals(p.ConnectionMode, "manual", StringComparison.OrdinalIgnoreCase))
-        {
-            foreach (var peer in p.PeerUrls.Where(x => !string.IsNullOrWhiteSpace(x)))
-            {
-                args.Add("-p");
-                args.Add(peer.Trim());
-            }
-        }
-
-        if (p.Listeners.Count == 0)
-        {
-            args.Add("--no-listener");
-        }
-        else
-        {
-            foreach (var l in p.Listeners.Where(x => !string.IsNullOrWhiteSpace(x)))
-            {
-                args.Add("-l");
-                args.Add(l.Trim());
-            }
-        }
-
-        foreach (var cidr in p.ProxyCidrs.Where(x => !string.IsNullOrWhiteSpace(x)))
-        {
-            args.Add("-n");
-            args.Add(cidr.Trim());
-        }
-
-        if (p.DisableEncryption)
-        {
-            args.Add("--disable-encryption");
-            args.Add("true");
-        }
-        else if (!string.IsNullOrWhiteSpace(p.EncryptionAlgorithm))
-        {
-            args.Add("--encryption-algorithm");
-            args.Add(p.EncryptionAlgorithm);
-        }
-
-        var devName = string.IsNullOrWhiteSpace(p.DevName) ? $"et_{p.NetworkId}" : p.DevName.Trim();
-        args.Add("--dev-name");
-        args.Add(devName);
-
-        if (p.Mtu > 0)
-        {
-            args.Add("--mtu");
-            args.Add(p.Mtu.ToString());
-        }
-
-        if (p.LatencyFirst)
-        {
-            args.Add("--latency-first");
-            args.Add("true");
-        }
-
-        if (p.EnableKcpProxy)
-        {
-            args.Add("--enable-kcp-proxy");
-            args.Add("true");
-        }
-
-        if (p.EnableQuicProxy)
-        {
-            args.Add("--enable-quic-proxy");
-            args.Add("true");
-        }
-
-        return args;
+        Directory.CreateDirectory(_runtimeConfigDir);
+        var path = Path.Combine(_runtimeConfigDir, $"{profile.NetworkId}.toml");
+        File.WriteAllText(path, profile.ConfigToml);
+        return path;
     }
+
+    private void DeleteRuntimeConfig(string networkId)
+    {
+        try { File.Delete(Path.Combine(_runtimeConfigDir, $"{networkId}.toml")); } catch { }
+    }
+
+    /// <summary>由核心检查配置语法；核心缺失时跳过。</summary>
+    public async Task<bool> CheckConfigAsync(string toml)
+    {
+        if (!IsCoreAvailable) return true;
+
+        Directory.CreateDirectory(_runtimeConfigDir);
+        var path = Path.Combine(_runtimeConfigDir, $"check-{Guid.NewGuid():N}.tmp");
+        try
+        {
+            await File.WriteAllTextAsync(path, toml);
+            var psi = new ProcessStartInfo { FileName = _coreExePath, UseShellExecute = false, CreateNoWindow = true };
+            psi.ArgumentList.Add("-c");
+            psi.ArgumentList.Add(path);
+            psi.ArgumentList.Add("--disable-env-parsing");
+            psi.ArgumentList.Add("--check-config");
+
+            using var proc = Process.Start(psi) ?? throw new InvalidOperationException("无法启动核心检查配置");
+            _jobObject.AssignProcess(proc);
+            try
+            {
+                await proc.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+            }
+            catch (TimeoutException)
+            {
+                proc.Kill(entireProcessTree: true);
+                throw new TimeoutException("核心检查配置超时");
+            }
+            return proc.ExitCode == 0;
+        }
+        finally
+        {
+            try { File.Delete(path); } catch { }
+        }
+    }
+
+    /// <summary>没有虚拟 IP 的远端节点（公共/中继服务器）不在节点列表中展示。</summary>
+    public static bool IsVisiblePeer(HostPeerInfo peer) =>
+        peer.IsSelf || (!string.IsNullOrWhiteSpace(peer.Ipv4) && peer.Ipv4 is not ("-" or "0.0.0.0"));
 
     private int AllocateFreeTcpPort()
     {
@@ -513,11 +470,12 @@ public sealed class EasyTierManager : IAsyncDisposable
         private string _lastPeersSignature = string.Empty;
         private int _lastRemotePeerCount = -1;
 
-        public RunningInstance(NetworkProfile profile, Process process, int rpcPort, CancellationTokenSource cts)
+        public RunningInstance(NetworkProfile profile, Process process, int rpcPort, string devName, CancellationTokenSource cts)
         {
             Profile = profile;
             Process = process;
             RpcPort = rpcPort;
+            DevName = devName;
             Cts = cts;
             StartTimeUtc = DateTime.UtcNow;
             Hostname = profile.Hostname;
@@ -538,6 +496,7 @@ public sealed class EasyTierManager : IAsyncDisposable
         public NetworkProfile Profile { get; }
         public Process Process { get; }
         public int RpcPort { get; }
+        public string DevName { get; }
         public CancellationTokenSource Cts { get; }
         public DateTime StartTimeUtc { get; }
         public string Ipv4 { get; set; } = string.Empty;

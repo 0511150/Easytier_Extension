@@ -88,7 +88,7 @@ public static class ResolutionPresets
 public sealed class ShareSettings
 {
     [JsonPropertyName("capture_source")]
-    public string CaptureSource { get; set; } = "fullscreen"; // "fullscreen" | "window"
+    public string CaptureSource { get; set; } = "window"; // "window" | "fullscreen"
 
     [JsonPropertyName("capture_api")]
     public string CaptureApi { get; set; } = "wgc"; // "wgc" | "dxgi"
@@ -99,23 +99,33 @@ public sealed class ShareSettings
     [JsonIgnore]
     public IntPtr TargetWindowHwnd { get; set; }
 
+    [JsonPropertyName("target_monitor_device")]
+    public string TargetMonitorDevice { get; set; } = string.Empty;
+
+    [JsonIgnore]
+    public IntPtr TargetMonitorHandle { get; set; }
+
     [JsonPropertyName("resolution")]
     public string Resolution { get; set; } = "original";
 
     [JsonPropertyName("fps")]
-    public int Fps { get; set; } = 60;
+    public int Fps { get; set; } = 30;
 
     [JsonPropertyName("bitrate_mbps")]
-    public int BitrateMbps { get; set; } = 8;
+    public int BitrateMbps { get; set; } = 4;
 
     [JsonPropertyName("share_audio")]
     public bool ShareAudio { get; set; } = true;
 
     [JsonPropertyName("allow_control")]
-    public bool AllowRemoteControl { get; set; }
+    public bool AllowRemoteControl { get; set; } = false;
 
     [JsonPropertyName("target_network")]
     public string TargetNetworkId { get; set; } = "__all__";
+
+    public static int NormalizeFps(int fps) => fps is 15 or 30 or 60 ? fps : 30;
+
+    public static int NormalizeBitrate(int mbps) => mbps is 2 or 4 or 6 ? mbps : 4;
 }
 
 public sealed class ScreenShareServer : IAsyncDisposable
@@ -391,12 +401,12 @@ public sealed class ScreenShareServer : IAsyncDisposable
                 try
                 {
                     capturer = _settings.CaptureApi == "dxgi"
-                        ? new DxgiScreenCapturer(device)
-                        : new WgcScreenCapturer(device);
+                        ? new DxgiScreenCapturer(device, _settings.TargetMonitorDevice)
+                        : new WgcScreenCapturer(device, targetMonitorHandle: _settings.TargetMonitorHandle);
                 }
                 catch
                 {
-                    capturer = new DxgiScreenCapturer(device);
+                    capturer = new DxgiScreenCapturer(device, _settings.TargetMonitorDevice);
                 }
             }
 
@@ -641,6 +651,19 @@ public sealed class ScreenShareServer : IAsyncDisposable
 
             double screenX = winLeft + srcNormX * winW;
             double screenY = winTop + srcNormY * winH;
+            absX = (int)Math.Clamp((screenX - vLeft) / vWidth * 65535.0, 0, 65535);
+            absY = (int)Math.Clamp((screenY - vTop) / vHeight * 65535.0, 0, 65535);
+            extraFlags |= 0x4000; // MOUSEEVENTF_VIRTUALDESK
+        }
+        else if (WindowEnumerator.TryGetMonitorBounds(_settings.TargetMonitorHandle, out int monLeft, out int monTop, out int monW, out int monH))
+        {
+            int vLeft = GetSystemMetrics(76);
+            int vTop = GetSystemMetrics(77);
+            int vWidth = Math.Max(1, GetSystemMetrics(78));
+            int vHeight = Math.Max(1, GetSystemMetrics(79));
+
+            double screenX = monLeft + srcNormX * monW;
+            double screenY = monTop + srcNormY * monH;
             absX = (int)Math.Clamp((screenX - vLeft) / vWidth * 65535.0, 0, 65535);
             absY = (int)Math.Clamp((screenY - vTop) / vHeight * 65535.0, 0, 65535);
             extraFlags |= 0x4000; // MOUSEEVENTF_VIRTUALDESK

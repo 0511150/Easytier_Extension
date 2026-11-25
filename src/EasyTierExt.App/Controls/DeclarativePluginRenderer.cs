@@ -1,3 +1,4 @@
+using System.IO;
 using System.Text.Json;
 using EasyTierExt.App.Native;
 using EasyTierExt.Contracts.Ipc;
@@ -7,6 +8,7 @@ using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.UI;
 
 namespace EasyTierExt.App.Controls;
@@ -203,6 +205,62 @@ public sealed class DeclarativePluginRenderer
             bar.Children.Add(rightButtons);
             stack.Children.Add(bar);
         }
+        else if (string.Equals(section.Layout, "split", StringComparison.OrdinalIgnoreCase))
+        {
+            var splitGrid = new Grid { ColumnSpacing = 20 };
+            splitGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.45, GridUnitType.Star) });
+            splitGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.0, GridUnitType.Star), MinWidth = 270 });
+
+            var leftStack = new StackPanel { Spacing = 12 };
+            var rightTopStack = new StackPanel { Spacing = 14 };
+            var rightBottomStack = new StackPanel { Spacing = 8, Margin = new Thickness(0, 16, 0, 0) };
+
+            foreach (var item in section.Items)
+            {
+                var initial = ResolveValue(item, cachedValues);
+                var el = item.Type == "table"
+                    ? CreateTable(pluginId, menuId, item, initial)
+                    : CreateOptionRow(pluginId, menuId, item, initial);
+
+                if (string.Equals(item.Column, "left", StringComparison.OrdinalIgnoreCase))
+                {
+                    leftStack.Children.Add(el);
+                }
+                else if (item.Primary)
+                {
+                    rightBottomStack.Children.Add(el);
+                }
+                else
+                {
+                    rightTopStack.Children.Add(el);
+                }
+            }
+
+            var leftPane = new Border
+            {
+                Background = new SolidColorBrush(Color.FromArgb(255, 26, 26, 30)),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(255, 42, 42, 50)),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(8),
+                Padding = new Thickness(14),
+                Child = leftStack
+            };
+            Grid.SetColumn(leftPane, 0);
+            splitGrid.Children.Add(leftPane);
+
+            var rightGrid = new Grid();
+            rightGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+            rightGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            Grid.SetRow(rightTopStack, 0);
+            Grid.SetRow(rightBottomStack, 1);
+            rightGrid.Children.Add(rightTopStack);
+            rightGrid.Children.Add(rightBottomStack);
+
+            Grid.SetColumn(rightGrid, 1);
+            splitGrid.Children.Add(rightGrid);
+
+            stack.Children.Add(splitGrid);
+        }
         else
         {
             for (int idx = 0; idx < section.Items.Count; idx++)
@@ -226,29 +284,89 @@ public sealed class DeclarativePluginRenderer
 
     private UIElement CreateOptionRow(string pluginId, string menuId, UiItem item, JsonElement? initial)
     {
-        var row = new Grid { MinHeight = 36, ColumnSpacing = 16 };
-        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-
-        var label = new TextBlock
+        if (item.Type == "source_picker")
         {
-            Text = item.Label,
-            VerticalAlignment = VerticalAlignment.Center,
-            FontSize = 13.5,
-            Foreground = new SolidColorBrush(Color.FromArgb(255, 229, 231, 235))
-        };
-        Grid.SetColumn(label, 0);
-        row.Children.Add(label);
+            return CreateSourcePicker(pluginId, menuId, item, initial);
+        }
+
+        if (item.Primary && item.Type == "button")
+        {
+            return CreateButton(pluginId, menuId, item, initial);
+        }
 
         FrameworkElement control = item.Type switch
         {
             "switch" => CreateSwitch(pluginId, menuId, item, initial),
             "select" => CreateSelect(pluginId, menuId, item, initial),
+            "segmented" => CreateSegmented(pluginId, menuId, item, initial),
             "input" => CreateInput(pluginId, menuId, item, initial),
             "number" => CreateNumber(pluginId, menuId, item, initial),
             "button" => CreateButton(pluginId, menuId, item, initial),
             _ => CreateStatusText(item, initial)
         };
+
+        if (item.Stacked)
+        {
+            var stacked = new StackPanel { Spacing = 6 };
+            var header = new StackPanel { Spacing = 2 };
+            header.Children.Add(new TextBlock
+            {
+                Text = item.Label,
+                FontSize = 13.5,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = new SolidColorBrush(Color.FromArgb(255, 229, 231, 235))
+            });
+            if (!string.IsNullOrWhiteSpace(item.Subtitle))
+            {
+                header.Children.Add(new TextBlock
+                {
+                    Text = item.Subtitle,
+                    FontSize = 11.5,
+                    Foreground = new SolidColorBrush(Color.FromArgb(255, 156, 163, 175)),
+                    TextWrapping = TextWrapping.Wrap
+                });
+            }
+            stacked.Children.Add(header);
+            control.HorizontalAlignment = HorizontalAlignment.Stretch;
+            stacked.Children.Add(control);
+            return stacked;
+        }
+
+        var row = new Grid { MinHeight = 36, ColumnSpacing = 16 };
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        if (!string.IsNullOrWhiteSpace(item.Subtitle))
+        {
+            var labelStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Spacing = 2 };
+            labelStack.Children.Add(new TextBlock
+            {
+                Text = item.Label,
+                FontSize = 13.5,
+                Foreground = new SolidColorBrush(Color.FromArgb(255, 229, 231, 235))
+            });
+            labelStack.Children.Add(new TextBlock
+            {
+                Text = item.Subtitle,
+                FontSize = 11.5,
+                Foreground = new SolidColorBrush(Color.FromArgb(255, 156, 163, 175)),
+                TextWrapping = TextWrapping.Wrap
+            });
+            Grid.SetColumn(labelStack, 0);
+            row.Children.Add(labelStack);
+        }
+        else
+        {
+            var label = new TextBlock
+            {
+                Text = item.Label,
+                VerticalAlignment = VerticalAlignment.Center,
+                FontSize = 13.5,
+                Foreground = new SolidColorBrush(Color.FromArgb(255, 229, 231, 235))
+            };
+            Grid.SetColumn(label, 0);
+            row.Children.Add(label);
+        }
 
         Grid.SetColumn(control, 1);
         row.Children.Add(control);
@@ -281,7 +399,9 @@ public sealed class DeclarativePluginRenderer
 
     private ComboBox CreateSelect(string pluginId, string menuId, UiItem item, JsonElement? initial)
     {
-        var combo = new ComboBox { MinWidth = 180, MaxWidth = 380 };
+        var combo = item.Stacked
+            ? new ComboBox { HorizontalAlignment = HorizontalAlignment.Stretch }
+            : new ComboBox { MinWidth = 180, MaxWidth = 380 };
         var options = item.Options ?? [];
         foreach (var opt in options)
         {
@@ -381,6 +501,355 @@ public sealed class DeclarativePluginRenderer
         return nb;
     }
 
+    private Grid CreateSegmented(string pluginId, string menuId, UiItem item, JsonElement? initial)
+    {
+        var options = item.Options ?? [];
+        var grid = new Grid { ColumnSpacing = 8, HorizontalAlignment = HorizontalAlignment.Stretch };
+        var buttons = new List<Button>(options.Count);
+
+        void ApplyVisuals(JsonElement? selectedVal)
+        {
+            string? targetRaw = selectedVal?.ToString();
+            for (int i = 0; i < options.Count; i++)
+            {
+                bool active = targetRaw is not null &&
+                              string.Equals(options[i].Value.ToString(), targetRaw, StringComparison.OrdinalIgnoreCase);
+                var b = buttons[i];
+                b.Background = new SolidColorBrush(active ? Color.FromArgb(255, 59, 130, 246) : Color.FromArgb(255, 42, 42, 48));
+                b.BorderBrush = new SolidColorBrush(active ? Color.FromArgb(255, 96, 165, 250) : Color.FromArgb(255, 58, 58, 68));
+                b.Foreground = new SolidColorBrush(active ? Colors.White : Color.FromArgb(255, 209, 213, 219));
+                b.FontWeight = active ? FontWeights.SemiBold : FontWeights.Normal;
+            }
+        }
+
+        for (int i = 0; i < options.Count; i++)
+        {
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            var opt = options[i];
+            var btn = new Button
+            {
+                Content = opt.Label,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                Height = 34,
+                CornerRadius = new CornerRadius(6),
+                FontSize = 13,
+                BorderThickness = new Thickness(1)
+            };
+            btn.Click += async (_, _) =>
+            {
+                if (_suppressEvents) return;
+                ApplyVisuals(opt.Value);
+                await _onUiAction(pluginId, menuId, new EventUiActionParams
+                {
+                    MenuId = menuId,
+                    Key = item.Key,
+                    Action = "change",
+                    Value = opt.Value.Clone()
+                });
+            };
+            Grid.SetColumn(btn, i);
+            grid.Children.Add(btn);
+            buttons.Add(btn);
+        }
+
+        ApplyVisuals(initial);
+        _updaters[item.Key] = v => ApplyVisuals(v);
+        return grid;
+    }
+
+    private UIElement CreateSourcePicker(string pluginId, string menuId, UiItem item, JsonElement? initial)
+    {
+        var root = new Grid { RowSpacing = 12 };
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+
+        string activeTab = string.IsNullOrWhiteSpace(item.ActiveTab) ? "window" : item.ActiveTab!;
+        string? selectedId = initial is not null && initial.Value.ValueKind == JsonValueKind.String
+            ? initial.Value.GetString()
+            : null;
+        var currentCards = item.Cards ?? [];
+
+        var tabs = item.Tabs is { Count: > 0 }
+            ? item.Tabs
+            :
+            [
+                new UiSelectOption { Label = "程序", Value = JsonSerializer.SerializeToElement("window") },
+                new UiSelectOption { Label = "屏幕", Value = JsonSerializer.SerializeToElement("fullscreen") }
+            ];
+
+        var headerBar = new Grid { ColumnSpacing = 12 };
+        headerBar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        headerBar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        var tabPanel = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 18 };
+        var tabVisuals = new List<(string Val, TextBlock Text, Border Indicator)>();
+
+        void UpdateTabVisuals()
+        {
+            foreach (var (val, text, indicator) in tabVisuals)
+            {
+                bool active = string.Equals(val, activeTab, StringComparison.OrdinalIgnoreCase);
+                text.Foreground = new SolidColorBrush(active ? Color.FromArgb(255, 249, 250, 251) : Color.FromArgb(255, 156, 163, 175));
+                text.FontWeight = active ? FontWeights.SemiBold : FontWeights.Normal;
+                indicator.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
+            }
+        }
+
+        foreach (var t in tabs)
+        {
+            string tabVal = t.Value.ValueKind == JsonValueKind.String ? (t.Value.GetString() ?? "window") : t.Value.ToString();
+            var tabStack = new StackPanel { Spacing = 5 };
+            var tabText = new TextBlock { Text = t.Label, FontSize = 14 };
+            var indicator = new Border
+            {
+                Height = 3,
+                CornerRadius = new CornerRadius(1.5),
+                Background = new SolidColorBrush(Color.FromArgb(255, 59, 130, 246))
+            };
+            tabStack.Children.Add(tabText);
+            tabStack.Children.Add(indicator);
+
+            var tabBtn = new Button
+            {
+                Content = tabStack,
+                Background = new SolidColorBrush(Colors.Transparent),
+                BorderThickness = new Thickness(0),
+                Padding = new Thickness(4, 2, 4, 2)
+            };
+            tabBtn.Click += async (_, _) =>
+            {
+                if (_suppressEvents) return;
+                activeTab = tabVal;
+                UpdateTabVisuals();
+                await _onUiAction(pluginId, menuId, new EventUiActionParams
+                {
+                    MenuId = menuId,
+                    Key = item.Key,
+                    Action = "tab",
+                    Value = t.Value.Clone()
+                });
+            };
+            tabVisuals.Add((tabVal, tabText, indicator));
+            tabPanel.Children.Add(tabBtn);
+        }
+
+        UpdateTabVisuals();
+        Grid.SetColumn(tabPanel, 0);
+        headerBar.Children.Add(tabPanel);
+
+        var refreshBtn = new Button
+        {
+            Content = "↻ 刷新",
+            FontSize = 12,
+            Padding = new Thickness(10, 4, 10, 4)
+        };
+        refreshBtn.Click += async (_, _) =>
+        {
+            await _onUiAction(pluginId, menuId, new EventUiActionParams
+            {
+                MenuId = menuId,
+                Key = item.Key,
+                Action = "refresh"
+            });
+        };
+        Grid.SetColumn(refreshBtn, 1);
+        headerBar.Children.Add(refreshBtn);
+
+        Grid.SetRow(headerBar, 0);
+        root.Children.Add(headerBar);
+
+        var gridHost = new Grid { ColumnSpacing = 12, RowSpacing = 12 };
+        var scroller = new ScrollViewer
+        {
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            MaxHeight = 370,
+            MinHeight = 270,
+            Content = gridHost
+        };
+        Grid.SetRow(scroller, 1);
+        root.Children.Add(scroller);
+
+        var cardVisuals = new List<(string Id, Border CardBorder, TextBlock TitleText)>();
+
+        void UpdateSelectionVisuals()
+        {
+            foreach (var (cid, border, titleTb) in cardVisuals)
+            {
+                bool sel = string.Equals(cid, selectedId, StringComparison.OrdinalIgnoreCase);
+                border.BorderBrush = new SolidColorBrush(sel ? Color.FromArgb(255, 59, 130, 246) : Color.FromArgb(255, 52, 52, 61));
+                border.BorderThickness = new Thickness(sel ? 2 : 1);
+                border.Background = new SolidColorBrush(sel ? Color.FromArgb(255, 30, 41, 59) : Color.FromArgb(255, 34, 34, 40));
+                titleTb.Foreground = new SolidColorBrush(sel ? Colors.White : Color.FromArgb(255, 209, 213, 219));
+            }
+        }
+
+        void RebuildCards(List<UiSourceCard> cards)
+        {
+            gridHost.Children.Clear();
+            gridHost.RowDefinitions.Clear();
+            gridHost.ColumnDefinitions.Clear();
+            cardVisuals.Clear();
+
+            if (cards.Count == 0)
+            {
+                gridHost.Children.Add(new TextBlock
+                {
+                    Text = "暂无可捕获的窗口，请打开目标程序后点击右上角“刷新”",
+                    FontSize = 13,
+                    Foreground = new SolidColorBrush(Color.FromArgb(255, 107, 114, 128)),
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(12, 60, 12, 60),
+                    TextWrapping = TextWrapping.Wrap
+                });
+                return;
+            }
+
+            gridHost.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            gridHost.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+            int rowCount = (cards.Count + 1) / 2;
+            for (int r = 0; r < rowCount; r++)
+            {
+                gridHost.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            }
+
+            for (int i = 0; i < cards.Count; i++)
+            {
+                var card = cards[i];
+                var cardBorder = new Border
+                {
+                    CornerRadius = new CornerRadius(8),
+                    Padding = new Thickness(6),
+                    BorderThickness = new Thickness(1)
+                };
+
+                var tooltipText = string.IsNullOrWhiteSpace(card.Subtitle) ? card.Title : $"{card.Title}\n{card.Subtitle}";
+                ToolTipService.SetToolTip(cardBorder, tooltipText);
+
+                var cardStack = new StackPanel { Spacing = 6 };
+                var thumbBox = new Border
+                {
+                    Height = 112,
+                    CornerRadius = new CornerRadius(6),
+                    Background = new SolidColorBrush(Color.FromArgb(255, 17, 17, 20))
+                };
+
+                var thumbGrid = new Grid();
+                var fallbackLabel = new TextBlock
+                {
+                    Text = card.Title,
+                    FontSize = 11.5,
+                    Foreground = new SolidColorBrush(Color.FromArgb(255, 107, 114, 128)),
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(8),
+                    TextTrimming = TextTrimming.CharacterEllipsis,
+                    MaxLines = 2
+                };
+                var img = new Image
+                {
+                    Stretch = Stretch.Uniform,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+                thumbGrid.Children.Add(fallbackLabel);
+                thumbGrid.Children.Add(img);
+                thumbBox.Child = thumbGrid;
+
+                if (!string.IsNullOrWhiteSpace(card.ThumbnailBase64))
+                {
+                    _ = LoadThumbnailAsync(img, fallbackLabel, card.ThumbnailBase64!);
+                }
+
+                var titleTb = new TextBlock
+                {
+                    Text = card.Title,
+                    FontSize = 12.5,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    TextTrimming = TextTrimming.CharacterEllipsis,
+                    MaxLines = 1
+                };
+
+                cardStack.Children.Add(thumbBox);
+                cardStack.Children.Add(titleTb);
+                cardBorder.Child = cardStack;
+
+                cardBorder.Tapped += async (_, _) =>
+                {
+                    if (_suppressEvents) return;
+                    selectedId = card.Id;
+                    UpdateSelectionVisuals();
+                    await _onUiAction(pluginId, menuId, new EventUiActionParams
+                    {
+                        MenuId = menuId,
+                        Key = item.Key,
+                        Action = "select",
+                        Value = JsonSerializer.SerializeToElement(card.Id)
+                    });
+                };
+
+                Grid.SetRow(cardBorder, i / 2);
+                Grid.SetColumn(cardBorder, i % 2);
+                gridHost.Children.Add(cardBorder);
+                cardVisuals.Add((card.Id, cardBorder, titleTb));
+            }
+
+            UpdateSelectionVisuals();
+        }
+
+        RebuildCards(currentCards);
+
+        _updaters[item.Key] = v =>
+        {
+            if (v.ValueKind == JsonValueKind.String)
+            {
+                selectedId = v.GetString();
+                UpdateSelectionVisuals();
+            }
+            else if (v.ValueKind == JsonValueKind.Object)
+            {
+                var state = v.Deserialize<UiSourcePickerState>();
+                if (state is null) return;
+                if (!string.IsNullOrWhiteSpace(state.ActiveTab))
+                {
+                    activeTab = state.ActiveTab!;
+                    UpdateTabVisuals();
+                }
+                if (state.SelectedId is not null)
+                {
+                    selectedId = state.SelectedId;
+                }
+                if (state.Cards is not null)
+                {
+                    RebuildCards(state.Cards);
+                }
+                else
+                {
+                    UpdateSelectionVisuals();
+                }
+            }
+        };
+
+        return root;
+    }
+
+    private static async Task LoadThumbnailAsync(Image image, TextBlock fallbackLabel, string base64)
+    {
+        try
+        {
+            byte[] bytes = Convert.FromBase64String(base64);
+            using var ms = new MemoryStream(bytes);
+            var bmp = new BitmapImage { DecodePixelWidth = 288 };
+            await bmp.SetSourceAsync(ms.AsRandomAccessStream());
+            image.Source = bmp;
+            fallbackLabel.Visibility = Visibility.Collapsed;
+        }
+        catch
+        {
+        }
+    }
+
     private Button CreateButton(string pluginId, string menuId, UiItem item, JsonElement? initial)
     {
         var btn = new Button
@@ -390,11 +859,37 @@ public sealed class DeclarativePluginRenderer
                 : item.Label,
             IsEnabled = !item.Disabled
         };
-        if (item.Danger)
+
+        if (item.Primary)
         {
-            btn.Background = new SolidColorBrush(Color.FromArgb(255, 185, 28, 28));
-            btn.Foreground = new SolidColorBrush(Colors.White);
+            btn.HorizontalAlignment = HorizontalAlignment.Stretch;
+            btn.Height = 40;
+            btn.CornerRadius = new CornerRadius(8);
+            btn.FontSize = 14;
+            btn.FontWeight = FontWeights.SemiBold;
         }
+
+        void ApplyButtonTheme(bool danger)
+        {
+            if (danger)
+            {
+                btn.Background = new SolidColorBrush(Color.FromArgb(255, 220, 38, 38));
+                btn.Foreground = new SolidColorBrush(Colors.White);
+            }
+            else if (item.Primary)
+            {
+                btn.Background = new SolidColorBrush(Color.FromArgb(255, 59, 130, 246));
+                btn.Foreground = new SolidColorBrush(Colors.White);
+            }
+            else
+            {
+                btn.ClearValue(Control.BackgroundProperty);
+                btn.ClearValue(Control.ForegroundProperty);
+            }
+        }
+
+        ApplyButtonTheme(item.Danger);
+
         btn.Click += async (_, _) =>
         {
             await _onUiAction(pluginId, menuId, new EventUiActionParams
@@ -419,6 +914,10 @@ public sealed class DeclarativePluginRenderer
                 if (v.TryGetProperty("disabled", out var dis))
                 {
                     btn.IsEnabled = dis.ValueKind != JsonValueKind.True;
+                }
+                if (v.TryGetProperty("danger", out var dng))
+                {
+                    ApplyButtonTheme(dng.ValueKind == JsonValueKind.True);
                 }
             }
         };

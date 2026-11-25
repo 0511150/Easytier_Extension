@@ -20,6 +20,9 @@ public sealed class UiSection
     [JsonPropertyName("compact")]
     public bool Compact { get; set; }
 
+    [JsonPropertyName("layout")]
+    public string? Layout { get; set; }
+
     [JsonPropertyName("items")]
     public List<UiItem> Items { get; set; } = [];
 }
@@ -30,13 +33,34 @@ public sealed class UiItem
     public string Key { get; set; } = string.Empty;
 
     /// <summary>
-    /// Supported: switch, select, input, number, status, button, table, viewport
+    /// Supported: switch, select, segmented, source_picker, input, number, status, button, table, viewport
     /// </summary>
     [JsonPropertyName("type")]
     public string Type { get; set; } = "status";
 
     [JsonPropertyName("label")]
     public string Label { get; set; } = string.Empty;
+
+    [JsonPropertyName("subtitle")]
+    public string? Subtitle { get; set; }
+
+    [JsonPropertyName("column")]
+    public string? Column { get; set; }
+
+    [JsonPropertyName("stacked")]
+    public bool Stacked { get; set; }
+
+    [JsonPropertyName("primary")]
+    public bool Primary { get; set; }
+
+    [JsonPropertyName("active_tab")]
+    public string? ActiveTab { get; set; }
+
+    [JsonPropertyName("tabs")]
+    public List<UiSelectOption>? Tabs { get; set; }
+
+    [JsonPropertyName("cards")]
+    public List<UiSourceCard>? Cards { get; set; }
 
     [JsonPropertyName("value")]
     public JsonElement? Value { get; set; }
@@ -103,4 +127,31 @@ public sealed class UiRowAction
 
     [JsonPropertyName("when_equals")]
     public JsonElement? WhenEquals { get; set; }
+}
+
+public sealed class UiSourceCard
+{
+    [JsonPropertyName("id")]
+    public string Id { get; set; } = string.Empty;
+
+    [JsonPropertyName("title")]
+    public string Title { get; set; } = string.Empty;
+
+    [JsonPropertyName("subtitle")]
+    public string? Subtitle { get; set; }
+
+    [JsonPropertyName("thumbnail_base64")]
+    public string? ThumbnailBase64 { get; set; }
+}
+
+public sealed class UiSourcePickerState
+{
+    [JsonPropertyName("active_tab")]
+    public string? ActiveTab { get; set; }
+
+    [JsonPropertyName("selected_id")]
+    public string? SelectedId { get; set; }
+
+    [JsonPropertyName("cards")]
+    public List<UiSourceCard>? Cards { get; set; }
 }

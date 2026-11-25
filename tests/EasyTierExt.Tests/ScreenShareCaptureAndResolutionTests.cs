@@ -56,10 +56,33 @@ public class ScreenShareCaptureAndResolutionTests
     }
 
     [Fact]
-    public void WindowEnumerator_EnumeratesSafely_And_RejectsZeroHwnd()
+    public async Task WindowEnumerator_And_ShareSettings_Defaults_AreSafe()
     {
         var windows = WindowEnumerator.GetCapturableWindows();
         Assert.NotNull(windows);
         Assert.False(WindowEnumerator.IsValidWindow(IntPtr.Zero));
+
+        var monitors = WindowEnumerator.GetCapturableMonitors();
+        Assert.NotNull(monitors);
+        Assert.False(WindowEnumerator.IsValidMonitor(IntPtr.Zero));
+
+        Assert.Null(await ThumbnailCapturer.CaptureWindowJpegBase64Async(IntPtr.Zero));
+
+        var defaults = new ShareSettings();
+        Assert.Equal("window", defaults.CaptureSource);
+        Assert.Equal(30, defaults.Fps);
+        Assert.Equal(4, defaults.BitrateMbps);
+        Assert.True(defaults.ShareAudio);
+        Assert.False(defaults.AllowRemoteControl);
+
+        Assert.Equal(15, ShareSettings.NormalizeFps(15));
+        Assert.Equal(30, ShareSettings.NormalizeFps(30));
+        Assert.Equal(60, ShareSettings.NormalizeFps(60));
+        Assert.Equal(30, ShareSettings.NormalizeFps(144));
+
+        Assert.Equal(2, ShareSettings.NormalizeBitrate(2));
+        Assert.Equal(4, ShareSettings.NormalizeBitrate(4));
+        Assert.Equal(6, ShareSettings.NormalizeBitrate(6));
+        Assert.Equal(4, ShareSettings.NormalizeBitrate(8));
     }
 }

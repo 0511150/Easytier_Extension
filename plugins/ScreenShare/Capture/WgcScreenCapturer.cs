@@ -26,7 +26,7 @@ public sealed class WgcScreenCapturer : IScreenCapturer
     public int Height { get; private set; }
     public bool IsTargetClosed => _targetClosed || (_targetWindowHwnd != IntPtr.Zero && !WindowEnumerator.IsValidWindow(_targetWindowHwnd));
 
-    public WgcScreenCapturer(ID3D11Device device, IntPtr targetWindowHwnd = default)
+    public WgcScreenCapturer(ID3D11Device device, IntPtr targetWindowHwnd = default, IntPtr targetMonitorHandle = default)
     {
         _device = device;
         _context = device.ImmediateContext;
@@ -51,7 +51,9 @@ public sealed class WgcScreenCapturer : IScreenCapturer
         }
         else
         {
-            IntPtr hMonitor = MonitorFromPoint(new POINT { X = 0, Y = 0 }, MONITOR_DEFAULTTOPRIMARY);
+            IntPtr hMonitor = targetMonitorHandle != IntPtr.Zero && WindowEnumerator.IsValidMonitor(targetMonitorHandle)
+                ? targetMonitorHandle
+                : MonitorFromPoint(new POINT { X = 0, Y = 0 }, MONITOR_DEFAULTTOPRIMARY);
             pItem = interop.CreateForMonitor(hMonitor, ref itemGuid);
         }
 

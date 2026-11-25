@@ -22,6 +22,9 @@ public sealed class MarketplaceSourceConfig
 
     [JsonPropertyName("cached_plugin_count")]
     public int CachedPluginCount { get; set; }
+
+    [JsonIgnore]
+    public bool LastLoadFailed { get; set; }
 }
 
 public sealed class ClientConfig
@@ -102,29 +105,30 @@ public sealed class ClientConfig
 
 public sealed class NetworkProfile
 {
+    public const string DefaultPeer = "tcp://public.easytier.top:11010";
+
     [JsonPropertyName("network_id")]
     public string NetworkId { get; set; } = Guid.NewGuid().ToString("N")[..8];
 
     [JsonPropertyName("display_name")]
     public string DisplayName { get; set; } = "默认网络";
 
+    [JsonPropertyName("auto_start")]
+    public bool AutoStart { get; set; }
+
+    /// <summary>EasyTier TOML 配置，网络参数的唯一数据源。</summary>
+    [JsonPropertyName("config_toml")]
+    public string ConfigToml { get; set; } = string.Empty;
+
+    // 以下字段是 ConfigToml 的只读缓存，由 NetworkConfigToml 刷新；ConfigToml 为空时用作生成初值。
     [JsonPropertyName("network_name")]
     public string NetworkName { get; set; } = "easytier-ext";
 
     [JsonPropertyName("network_secret")]
     public string NetworkSecret { get; set; } = "easytier-secret";
 
-    /// <summary>
-    /// "public" | "manual" | "standalone"
-    /// </summary>
-    [JsonPropertyName("connection_mode")]
-    public string ConnectionMode { get; set; } = "public";
-
-    [JsonPropertyName("public_server")]
-    public string PublicServer { get; set; } = "tcp://public.easytier.top:11010";
-
     [JsonPropertyName("peer_urls")]
-    public List<string> PeerUrls { get; set; } = [];
+    public List<string> PeerUrls { get; set; } = [DefaultPeer];
 
     /// <summary>
     /// "dhcp" | "static"
@@ -138,39 +142,9 @@ public sealed class NetworkProfile
     [JsonPropertyName("hostname")]
     public string Hostname { get; set; } = Environment.MachineName;
 
-    [JsonPropertyName("auto_start")]
-    public bool AutoStart { get; set; }
-
-    // Advanced Configuration
-    [JsonPropertyName("proxy_cidrs")]
-    public List<string> ProxyCidrs { get; set; } = [];
-
-    [JsonPropertyName("listeners")]
-    public List<string> Listeners { get; set; } = ["tcp://0.0.0.0:11010", "udp://0.0.0.0:11010"];
-
-    [JsonPropertyName("disable_encryption")]
-    public bool DisableEncryption { get; set; }
-
-    [JsonPropertyName("encryption_algorithm")]
-    public string EncryptionAlgorithm { get; set; } = "aes-gcm";
-
-    [JsonPropertyName("dev_name")]
-    public string DevName { get; set; } = string.Empty;
-
-    [JsonPropertyName("mtu")]
-    public int Mtu { get; set; } = 1360;
-
-    [JsonPropertyName("latency_first")]
-    public bool LatencyFirst { get; set; }
-
-    [JsonPropertyName("enable_kcp_proxy")]
-    public bool EnableKcpProxy { get; set; }
-
-    [JsonPropertyName("enable_quic_proxy")]
-    public bool EnableQuicProxy { get; set; }
-
-    [JsonPropertyName("no_tun")]
-    public bool NoTun { get; set; }
+    /// <summary>旧版 client.json 中的结构化高级字段，仅用于一次性迁移到 ConfigToml。</summary>
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? LegacyFields { get; set; }
 }
 
 public sealed class ClientConfigStore
@@ -213,7 +187,6 @@ public sealed class ClientConfigStore
             {
                 Networks = [new NetworkProfile()]
             };
-            defaultConfig.EnsureSourcesNormalized();
             Save(defaultConfig);
             return defaultConfig;
         }
@@ -225,14 +198,29 @@ public sealed class ClientConfigStore
             cfg.Networks.Add(new NetworkProfile());
         }
         cfg.EnsureSourcesNormalized();
+        if (EnsureNetworkConfigs(cfg))
+        {
+            Save(cfg);
+        }
         return cfg;
     }
 
     public void Save(ClientConfig config)
     {
         config.EnsureSourcesNormalized();
+        EnsureNetworkConfigs(config);
         var json = JsonSerializer.Serialize(config, JsonOptions);
         File.WriteAllText(_configPath, json);
+    }
+
+    private static bool EnsureNetworkConfigs(ClientConfig config)
+    {
+        bool generated = false;
+        foreach (var network in config.Networks)
+        {
+            generated |= NetworkConfigToml.EnsureGenerated(network);
+        }
+        return generated;
     }
 
     public Dictionary<string, bool> LoadPluginStates()

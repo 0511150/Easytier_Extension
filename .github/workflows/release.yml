@@ -45,6 +45,14 @@ jobs:
           }
           "EASYTIER_CORE_SRC=$corePath" | Out-File -FilePath $env:GITHUB_ENV -Append
 
+      - name: Resolve Release Version
+        shell: pwsh
+        run: |
+          $tag = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } elseif ('${{ inputs.tag }}') { '${{ inputs.tag }}' } else { 'v1.0.0' }
+          $appVer = $tag.Trim().TrimStart('v', 'V')
+          "RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "APP_VERSION=$appVer" | Out-File -FilePath $env:GITHUB_ENV -Append
+
       - name: Build, Package and Run Tests
         shell: pwsh
         run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build-dist.ps1
@@ -52,13 +60,15 @@ jobs:
       - name: Prepare Release Assets
         shell: pwsh
         run: |
-          $tag = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } elseif ('${{ inputs.tag }}') { '${{ inputs.tag }}' } else { 'v1.0.0' }
+          if ((Test-Path "dist\plugins") -or (Test-Path "dist\market")) {
+            throw "Release bundle must not contain plugins or market directories."
+          }
+          $tag = $env:RELEASE_TAG
           $releaseDir = Join-Path $env:RUNNER_TEMP "release-assets"
           New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
           $clientZip = Join-Path $releaseDir "EasyTierWithExtension-win-x64-$tag.zip"
-          Compress-Archive -Path "dist\*" -DestinationPath $clientZip -Force
-          Copy-Item "dist\market\screen-share-*.zip" $releaseDir -Force
-          "RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::CreateFromDirectory((Resolve-Path "dist").Path, $clientZip)
           "RELEASE_DIR=$releaseDir" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Publish GitHub Release

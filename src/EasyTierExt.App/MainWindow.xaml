@@ -5,7 +5,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     Title="EasyTier with Extension">
 
-  <Grid x:Name="RootGrid" Background="#141416">
+  <Grid x:Name="RootGrid" Background="#141416" RequestedTheme="Dark">
     <Grid.ColumnDefinitions>
       <ColumnDefinition Width="236" />
       <ColumnDefinition Width="*" />
@@ -25,7 +25,7 @@
       <!-- Branding Header -->
       <StackPanel Grid.Row="0" VerticalAlignment="Center" Padding="18,10,14,6">
         <TextBlock Text="EasyTier" FontSize="16" FontWeight="SemiBold" Foreground="#F3F4F6" />
-        <TextBlock Text="with Extension" FontSize="11" Foreground="#8E929F" Margin="0,-2,0,0" />
+        <TextBlock x:Name="AppVersionSubText" Text="with Extension" FontSize="11" Foreground="#8E929F" Margin="0,-2,0,0" />
       </StackPanel>
 
       <Border Grid.Row="1" Height="1" Background="#28282E" Margin="12,0" />
@@ -62,6 +62,7 @@
         <Grid.ColumnDefinitions>
           <ColumnDefinition Width="Auto" />
           <ColumnDefinition Width="Auto" />
+          <ColumnDefinition Width="Auto" />
           <ColumnDefinition Width="*" />
           <ColumnDefinition Width="140" />
         </Grid.ColumnDefinitions>
@@ -78,7 +79,13 @@
           </StackPanel>
         </Border>
 
-        <Grid x:Name="DragTitleRegion" Grid.Column="2" Background="Transparent" />
+        <Border x:Name="UpdateBannerPill" Grid.Column="2" Visibility="Collapsed"
+                Background="#2D2447" BorderBrush="#7C5CFF" BorderThickness="1"
+                CornerRadius="10" Padding="10,4" Margin="8,0,0,0" VerticalAlignment="Center">
+          <TextBlock x:Name="UpdateBannerText" Text="发现新版本" FontSize="12" Foreground="#DDD6FE" />
+        </Border>
+
+        <Grid x:Name="DragTitleRegion" Grid.Column="3" Background="Transparent" />
       </Grid>
 
       <!-- Main Dynamic Content Host -->

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.IO.Pipes;
 using System.Text.Json;
 using EasyTierExt.Contracts.Ipc;
@@ -17,6 +18,8 @@ internal static class Program
     private static readonly JsonSerializerOptions SettingsJsonOptions = new() { WriteIndented = true };
     private static readonly TaskCompletionSource ExitTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private static readonly SemaphoreSlim RendererInitLock = new(1, 1);
+    private static readonly SemaphoreSlim ThumbnailRefreshLock = new(1, 1);
+    private static readonly ConcurrentDictionary<string, string?> ThumbnailCache = new(StringComparer.Ordinal);
 
     private static JsonRpcPipeConnection? _ipc;
     private static ScreenShareServer? _server;
@@ -25,8 +28,10 @@ internal static class Program
     private static List<HostNetworkStatus> _networks = [];
     private static List<ServicePeerInfo> _servicePeers = [];
     private static List<CapturableWindowInfo> _capturableWindows = [];
+    private static List<CapturableMonitorInfo> _capturableMonitors = [];
     private static bool _sharingEnabled;
     private static bool _inViewerMode;
+    private static string? _statusOverride;
 
     public static async Task Main(string[] args)
     {
@@ -60,19 +65,24 @@ internal static class Program
         });
 
         _networks = await _ipc.SendRequestAsync<List<HostNetworkStatus>>(IpcMethods.HostGetNetworks) ?? [];
-        RefreshCapturableWindows();
+        RefreshSourceListsMetadata();
+
         _server = new ScreenShareServer(Settings);
-        _server.StateChanged += () => _ = PushMetaUpdateAsync();
+        _server.StateChanged += () =>
+        {
+            _ = PushMetaUpdateAsync();
+            _ = RefreshShareStatusUiAsync();
+        };
         _server.CaptureTargetClosed += () => _ = HandleCaptureTargetClosedAsync();
 
-        // Register unified single menu declarative UI schema
+        // Register unified single menu declarative UI schema immediately
         await _ipc.SendRequestAsync<object>(IpcMethods.UiSetSchema, new UiSetSchemaParams
         {
             MenuId = MainMenuId,
             Schema = BuildSettingsPeersSchema()
         });
 
-        // Register in EasyTier network discovery
+        // Register in EasyTier network discovery (always across all connected virtual networks)
         await _ipc.SendRequestAsync<object>(IpcMethods.DiscoveryRegister, new DiscoveryRegisterParams
         {
             Port = ScreenShareServer.ControlPort,
@@ -82,6 +92,9 @@ internal static class Program
 
         _servicePeers = await _ipc.SendRequestAsync<List<ServicePeerInfo>>(IpcMethods.DiscoveryGetServicePeers) ?? [];
         await RefreshPeersTableAsync();
+
+        // Capture source thumbnails asynchronously so startup remains instant
+        _ = RefreshThumbnailsAndPushUiAsync(forceRefresh: false);
 
         await ExitTcs.Task;
 
@@ -105,9 +118,9 @@ internal static class Program
                     _networks = ev.Networks;
                     if (_sharingEnabled && _server is not null)
                     {
-                        StartServerOnSelectedNetworks();
+                        StartServerOnAllNetworks();
                     }
-                    await RefreshNetworkSelectAsync();
+                    await RefreshShareStatusUiAsync();
                 }
                 break;
             }
@@ -190,39 +203,40 @@ internal static class Program
                     }
                     break;
                 }
-                case "sharing_enabled":
-                    _sharingEnabled = ev.Value?.ValueKind == JsonValueKind.True;
-                    if (_sharingEnabled)
-                    {
-                        if (Settings.CaptureSource == "window")
-                        {
-                            RefreshCapturableWindows();
-                            if (!WindowEnumerator.IsValidWindow(Settings.TargetWindowHwnd))
-                            {
-                                _sharingEnabled = false;
-                                await RefreshNetworkSelectAsync();
-                                await PushMetaUpdateAsync();
-                                break;
-                            }
-                        }
-                        StartServerOnSelectedNetworks();
-                    }
-                    else
-                    {
-                        _server?.Stop();
-                    }
+                case "source_picker":
+                    await HandleSourcePickerActionAsync(ev);
+                    break;
+                case "resolution":
+                    Settings.Resolution = ResolutionPresets.Normalize(ev.Value?.GetString());
+                    SaveSettings();
+                    if (_sharingEnabled && Settings.CaptureSource == "fullscreen") StartServerOnAllNetworks();
+                    await RefreshShareStatusUiAsync();
                     await PushMetaUpdateAsync();
                     break;
-                case "target_network":
-                    Settings.TargetNetworkId = ev.Value?.GetString() ?? "__all__";
+                case "bitrate_mbps":
+                    if (ev.Value?.TryGetInt32(out int mbps) == true)
+                    {
+                        Settings.BitrateMbps = ShareSettings.NormalizeBitrate(mbps);
+                    }
                     SaveSettings();
-                    if (_sharingEnabled) StartServerOnSelectedNetworks();
+                    if (_sharingEnabled) StartServerOnAllNetworks();
+                    await RefreshShareStatusUiAsync();
+                    await PushMetaUpdateAsync();
+                    break;
+                case "fps":
+                    if (ev.Value?.TryGetInt32(out int fps) == true)
+                    {
+                        Settings.Fps = ShareSettings.NormalizeFps(fps);
+                    }
+                    SaveSettings();
+                    if (_sharingEnabled) StartServerOnAllNetworks();
+                    await RefreshShareStatusUiAsync();
                     await PushMetaUpdateAsync();
                     break;
                 case "share_audio":
                     Settings.ShareAudio = ev.Value?.ValueKind == JsonValueKind.True;
                     SaveSettings();
-                    if (_sharingEnabled) StartServerOnSelectedNetworks();
+                    if (_sharingEnabled) StartServerOnAllNetworks();
                     await PushMetaUpdateAsync();
                     break;
                 case "allow_control":
@@ -234,69 +248,8 @@ internal static class Program
                     }
                     await PushMetaUpdateAsync();
                     break;
-                case "capture_source":
-                    Settings.CaptureSource = ev.Value?.GetString() == "window" ? "window" : "fullscreen";
-                    if (Settings.CaptureSource == "window")
-                    {
-                        RefreshCapturableWindows();
-                    }
-                    SaveSettings();
-                    if (_sharingEnabled)
-                    {
-                        if (Settings.CaptureSource == "window" && !WindowEnumerator.IsValidWindow(Settings.TargetWindowHwnd))
-                        {
-                            _sharingEnabled = false;
-                            _server?.Stop();
-                        }
-                        else
-                        {
-                            StartServerOnSelectedNetworks();
-                        }
-                    }
-                    await RefreshNetworkSelectAsync();
-                    await PushMetaUpdateAsync();
-                    break;
-                case "target_window":
-                    if (long.TryParse(ev.Value?.GetString(), out long hwndVal) && hwndVal > 0)
-                    {
-                        Settings.TargetWindowHwnd = new IntPtr(hwndVal);
-                        var matched = _capturableWindows.FirstOrDefault(w => w.Hwnd == hwndVal);
-                        if (matched is not null)
-                        {
-                            Settings.LastWindowTitle = matched.Title;
-                        }
-                        SaveSettings();
-                        if (_sharingEnabled && Settings.CaptureSource == "window")
-                        {
-                            StartServerOnSelectedNetworks();
-                        }
-                    }
-                    break;
-                case "btn_refresh_windows":
-                    RefreshCapturableWindows();
-                    await RefreshNetworkSelectAsync();
-                    break;
-                case "capture_api":
-                    Settings.CaptureApi = ev.Value?.GetString() ?? "wgc";
-                    SaveSettings();
-                    if (_sharingEnabled && Settings.CaptureSource != "window") StartServerOnSelectedNetworks();
-                    break;
-                case "resolution":
-                    Settings.Resolution = ResolutionPresets.Normalize(ev.Value?.GetString());
-                    SaveSettings();
-                    if (_sharingEnabled && Settings.CaptureSource != "window") StartServerOnSelectedNetworks();
-                    await PushMetaUpdateAsync();
-                    break;
-                case "fps":
-                    if (ev.Value?.TryGetInt32(out int fps) == true) Settings.Fps = fps;
-                    SaveSettings();
-                    if (_sharingEnabled) StartServerOnSelectedNetworks();
-                    await PushMetaUpdateAsync();
-                    break;
-                case "bitrate_mbps":
-                    if (ev.Value?.TryGetInt32(out int mbps) == true) Settings.BitrateMbps = Math.Clamp(mbps, 1, 50);
-                    SaveSettings();
-                    if (_sharingEnabled) StartServerOnSelectedNetworks();
+                case "btn_toggle_share":
+                    await ToggleSharingAsync();
                     break;
             }
         }
@@ -315,6 +268,110 @@ internal static class Program
                     break;
             }
         }
+    }
+
+    private static async Task HandleSourcePickerActionAsync(EventUiActionParams ev)
+    {
+        switch (ev.Action)
+        {
+            case "tab":
+            {
+                string nextTab = ev.Value?.GetString() == "fullscreen" ? "fullscreen" : "window";
+                if (Settings.CaptureSource == nextTab) return;
+
+                Settings.CaptureSource = nextTab;
+                _statusOverride = null;
+                RefreshSourceListsMetadata();
+                SaveSettings();
+
+                if (_sharingEnabled)
+                {
+                    if (Settings.CaptureSource == "window" && !WindowEnumerator.IsValidWindow(Settings.TargetWindowHwnd))
+                    {
+                        _sharingEnabled = false;
+                        _server?.Stop();
+                    }
+                    else
+                    {
+                        StartServerOnAllNetworks();
+                    }
+                }
+
+                await RebuildMainSchemaAsync();
+                await PushMetaUpdateAsync();
+                _ = RefreshThumbnailsAndPushUiAsync(forceRefresh: false);
+                break;
+            }
+            case "select":
+            {
+                string? cardId = ev.Value?.GetString();
+                if (string.IsNullOrWhiteSpace(cardId)) return;
+
+                _statusOverride = null;
+                if (cardId.StartsWith("win:", StringComparison.OrdinalIgnoreCase) &&
+                    long.TryParse(cardId[4..], out long hwndVal) &&
+                    hwndVal > 0)
+                {
+                    Settings.CaptureSource = "window";
+                    Settings.TargetWindowHwnd = new IntPtr(hwndVal);
+                    var matched = _capturableWindows.FirstOrDefault(w => w.Hwnd == hwndVal);
+                    if (matched is not null) Settings.LastWindowTitle = matched.Title;
+                }
+                else if (cardId.StartsWith("mon:", StringComparison.OrdinalIgnoreCase) &&
+                         long.TryParse(cardId[4..], out long hmonVal) &&
+                         hmonVal > 0)
+                {
+                    Settings.CaptureSource = "fullscreen";
+                    Settings.TargetMonitorHandle = new IntPtr(hmonVal);
+                    var matched = _capturableMonitors.FirstOrDefault(m => m.HMonitor == hmonVal);
+                    if (matched is not null) Settings.TargetMonitorDevice = matched.DeviceName;
+                }
+
+                SaveSettings();
+                if (_sharingEnabled)
+                {
+                    StartServerOnAllNetworks();
+                }
+                await RefreshShareStatusUiAsync();
+                await PushMetaUpdateAsync();
+                break;
+            }
+            case "refresh":
+                _statusOverride = null;
+                await RefreshThumbnailsAndPushUiAsync(forceRefresh: true);
+                break;
+        }
+    }
+
+    private static async Task ToggleSharingAsync()
+    {
+        _statusOverride = null;
+        if (!_sharingEnabled)
+        {
+            if (Settings.CaptureSource == "window")
+            {
+                RefreshSourceListsMetadata();
+                if (!WindowEnumerator.IsValidWindow(Settings.TargetWindowHwnd))
+                {
+                    _sharingEnabled = false;
+                    _statusOverride = "请先在左侧选择要共享的程序窗口";
+                    await RefreshShareStatusUiAsync();
+                    _ = RefreshThumbnailsAndPushUiAsync(forceRefresh: true);
+                    return;
+                }
+            }
+
+            _sharingEnabled = true;
+            StartServerOnAllNetworks();
+        }
+        else
+        {
+            _sharingEnabled = false;
+            _server?.Stop();
+        }
+
+        await RefreshShareStatusUiAsync();
+        await PushMetaUpdateAsync();
     }
 
     private static async Task ExitViewerModeAsync()
@@ -336,6 +393,7 @@ internal static class Program
                 Schema = BuildSettingsPeersSchema()
             });
             await RefreshPeersTableAsync();
+            _ = RefreshThumbnailsAndPushUiAsync(forceRefresh: false);
         }
     }
 
@@ -367,12 +425,11 @@ internal static class Program
         }
     }
 
-    private static void StartServerOnSelectedNetworks()
+    private static void StartServerOnAllNetworks()
     {
         if (_server is null) return;
         var ips = _networks
             .Where(n => n.Running && !string.IsNullOrWhiteSpace(n.Ipv4))
-            .Where(n => Settings.TargetNetworkId == "__all__" || n.NetworkId == Settings.TargetNetworkId)
             .Select(n => n.Ipv4)
             .ToList();
         _server.Start(ips);
@@ -381,52 +438,166 @@ internal static class Program
     private static async Task PushMetaUpdateAsync()
     {
         if (_ipc is null) return;
-        List<string>? netIds = Settings.TargetNetworkId == "__all__" ? null : [Settings.TargetNetworkId];
         await _ipc.SendRequestAsync<object>(IpcMethods.DiscoveryUpdateMeta, new DiscoveryUpdateMetaParams
         {
             Meta = BuildMetaElement(),
-            NetworkIds = netIds
+            NetworkIds = null
         });
     }
 
     private static async Task HandleCaptureTargetClosedAsync()
     {
         _sharingEnabled = false;
-        RefreshCapturableWindows();
-        await RefreshNetworkSelectAsync();
+        _statusOverride = "共享窗口已关闭，已自动停止共享";
+        RefreshSourceListsMetadata();
+        await RebuildMainSchemaAsync();
         await PushMetaUpdateAsync();
+        _ = RefreshThumbnailsAndPushUiAsync(forceRefresh: true);
     }
 
-    private static void RefreshCapturableWindows()
+    private static void RefreshSourceListsMetadata()
     {
         _capturableWindows = WindowEnumerator.GetCapturableWindows();
         if (_capturableWindows.Count == 0)
         {
             Settings.TargetWindowHwnd = IntPtr.Zero;
-            return;
         }
-
-        var byHwnd = Settings.TargetWindowHwnd != IntPtr.Zero
-            ? _capturableWindows.FirstOrDefault(w => w.Hwnd == Settings.TargetWindowHwnd.ToInt64())
-            : null;
-        if (byHwnd is not null)
+        else
         {
-            Settings.LastWindowTitle = byHwnd.Title;
-            return;
+            var byHwnd = Settings.TargetWindowHwnd != IntPtr.Zero
+                ? _capturableWindows.FirstOrDefault(w => w.Hwnd == Settings.TargetWindowHwnd.ToInt64())
+                : null;
+            if (byHwnd is not null)
+            {
+                Settings.LastWindowTitle = byHwnd.Title;
+            }
+            else
+            {
+                var byTitle = !string.IsNullOrWhiteSpace(Settings.LastWindowTitle)
+                    ? _capturableWindows.FirstOrDefault(w => string.Equals(w.Title, Settings.LastWindowTitle, StringComparison.OrdinalIgnoreCase))
+                    : null;
+                var chosen = byTitle ?? _capturableWindows[0];
+                Settings.TargetWindowHwnd = new IntPtr(chosen.Hwnd);
+                Settings.LastWindowTitle = chosen.Title;
+            }
         }
 
-        var byTitle = !string.IsNullOrWhiteSpace(Settings.LastWindowTitle)
-            ? _capturableWindows.FirstOrDefault(w => string.Equals(w.Title, Settings.LastWindowTitle, StringComparison.OrdinalIgnoreCase))
-            : null;
-        var chosen = byTitle ?? _capturableWindows[0];
-        Settings.TargetWindowHwnd = new IntPtr(chosen.Hwnd);
-        Settings.LastWindowTitle = chosen.Title;
+        _capturableMonitors = WindowEnumerator.GetCapturableMonitors();
+        if (_capturableMonitors.Count == 0)
+        {
+            Settings.TargetMonitorHandle = IntPtr.Zero;
+        }
+        else
+        {
+            var byHandle = Settings.TargetMonitorHandle != IntPtr.Zero
+                ? _capturableMonitors.FirstOrDefault(m => m.HMonitor == Settings.TargetMonitorHandle.ToInt64())
+                : null;
+            var byDevice = byHandle ?? (!string.IsNullOrWhiteSpace(Settings.TargetMonitorDevice)
+                ? _capturableMonitors.FirstOrDefault(m => string.Equals(m.DeviceName, Settings.TargetMonitorDevice, StringComparison.OrdinalIgnoreCase))
+                : null);
+            var chosenMon = byDevice ?? _capturableMonitors[0];
+            Settings.TargetMonitorHandle = new IntPtr(chosenMon.HMonitor);
+            Settings.TargetMonitorDevice = chosenMon.DeviceName;
+        }
+    }
+
+    private static async Task RefreshThumbnailsAndPushUiAsync(bool forceRefresh)
+    {
+        if (_ipc is null || _inViewerMode) return;
+        await ThumbnailRefreshLock.WaitAsync();
+        try
+        {
+            if (forceRefresh)
+            {
+                ThumbnailCache.Clear();
+            }
+
+            RefreshSourceListsMetadata();
+
+            if (Settings.CaptureSource == "window")
+            {
+                var snapshot = _capturableWindows.Take(16).ToList();
+                foreach (var w in snapshot)
+                {
+                    string key = $"win:{w.Hwnd}";
+                    if (!forceRefresh && ThumbnailCache.ContainsKey(key)) continue;
+                    ThumbnailCache[key] = await ThumbnailCapturer.CaptureWindowJpegBase64Async(new IntPtr(w.Hwnd));
+                }
+            }
+            else
+            {
+                foreach (var m in _capturableMonitors)
+                {
+                    string key = $"mon:{m.HMonitor}";
+                    if (!forceRefresh && ThumbnailCache.ContainsKey(key)) continue;
+                    ThumbnailCache[key] = await ThumbnailCapturer.CaptureMonitorJpegBase64Async(m);
+                }
+            }
+
+            if (_ipc is null || _inViewerMode) return;
+            await _ipc.SendRequestAsync<object>(IpcMethods.UiUpdateValues, new UiUpdateValuesParams
+            {
+                MenuId = MainMenuId,
+                Values = new Dictionary<string, JsonElement>
+                {
+                    ["source_picker"] = JsonSerializer.SerializeToElement(new UiSourcePickerState
+                    {
+                        ActiveTab = Settings.CaptureSource,
+                        SelectedId = SelectedSourceCardId(),
+                        Cards = BuildCurrentSourceCards()
+                    })
+                }
+            });
+        }
+        catch
+        {
+        }
+        finally
+        {
+            ThumbnailRefreshLock.Release();
+        }
+    }
+
+    private static string SelectedSourceCardId() => Settings.CaptureSource == "fullscreen"
+        ? $"mon:{Settings.TargetMonitorHandle.ToInt64()}"
+        : $"win:{Settings.TargetWindowHwnd.ToInt64()}";
+
+    private static List<UiSourceCard> BuildCurrentSourceCards()
+    {
+        if (Settings.CaptureSource == "fullscreen")
+        {
+            return _capturableMonitors.Select(m =>
+            {
+                string id = $"mon:{m.HMonitor}";
+                ThumbnailCache.TryGetValue(id, out var thumb);
+                return new UiSourceCard
+                {
+                    Id = id,
+                    Title = m.DisplayLabel,
+                    Subtitle = m.DeviceName,
+                    ThumbnailBase64 = thumb
+                };
+            }).ToList();
+        }
+
+        return _capturableWindows.Take(16).Select(w =>
+        {
+            string id = $"win:{w.Hwnd}";
+            ThumbnailCache.TryGetValue(id, out var thumb);
+            return new UiSourceCard
+            {
+                Id = id,
+                Title = w.Title,
+                Subtitle = $"进程: {w.ProcessName}",
+                ThumbnailBase64 = thumb
+            };
+        }).ToList();
     }
 
     private static JsonElement BuildMetaElement()
     {
         var spec = Settings.CaptureSource == "window"
-            ? $"窗口捕获@{Settings.Fps}"
+            ? $"程序@{Settings.Fps}"
             : $"{(Settings.Resolution == "original" ? "原画" : Settings.Resolution)}@{Settings.Fps}";
         return JsonSerializer.SerializeToElement(new
         {
@@ -435,6 +606,43 @@ internal static class Program
             audio = Settings.ShareAudio,
             control = Settings.AllowRemoteControl,
             viewers = _server?.ActiveViewerCount ?? 0
+        });
+    }
+
+    private static string BuildShareStatusText()
+    {
+        if (!string.IsNullOrWhiteSpace(_statusOverride))
+        {
+            return _statusOverride!;
+        }
+
+        int runningNets = _networks.Count(n => n.Running);
+        if (_sharingEnabled)
+        {
+            int viewers = _server?.ActiveViewerCount ?? 0;
+            return $"共享中 · {runningNets} 个虚拟网络在线 · 观众 {viewers} 人";
+        }
+
+        return runningNets > 0
+            ? $"未开启 · 就绪（生效到全部 {runningNets} 个在线网络）"
+            : "未开启 · 暂无在线虚拟网络";
+    }
+
+    private static async Task RefreshShareStatusUiAsync()
+    {
+        if (_ipc is null || _inViewerMode) return;
+        await _ipc.SendRequestAsync<object>(IpcMethods.UiUpdateValues, new UiUpdateValuesParams
+        {
+            MenuId = MainMenuId,
+            Values = new Dictionary<string, JsonElement>
+            {
+                ["share_status"] = JsonSerializer.SerializeToElement(BuildShareStatusText()),
+                ["btn_toggle_share"] = JsonSerializer.SerializeToElement(new
+                {
+                    label = _sharingEnabled ? "停止共享" : "开始共享",
+                    danger = _sharingEnabled
+                })
+            }
         });
     }
 
@@ -478,7 +686,7 @@ internal static class Program
         });
     }
 
-    private static async Task RefreshNetworkSelectAsync()
+    private static async Task RebuildMainSchemaAsync()
     {
         if (_ipc is null || _inViewerMode) return;
         await _ipc.SendRequestAsync<object>(IpcMethods.UiSetSchema, new UiSetSchemaParams
@@ -514,18 +722,114 @@ internal static class Program
 
     private static UiPageSchema BuildSettingsPeersSchema()
     {
-        var netOptions = new List<UiSelectOption>
+        var rightItems = new List<UiItem>();
+
+        if (Settings.CaptureSource == "fullscreen")
         {
-            new() { Label = "全部已连接网络", Value = JsonSerializer.SerializeToElement("__all__") }
-        };
-        foreach (var n in _networks)
-        {
-            netOptions.Add(new UiSelectOption
+            rightItems.Add(new UiItem
             {
-                Label = $"{n.DisplayName} ({n.NetworkName})",
-                Value = JsonSerializer.SerializeToElement(n.NetworkId)
+                Key = "resolution",
+                Type = "select",
+                Column = "right",
+                Stacked = true,
+                Label = "分辨率",
+                Value = JsonSerializer.SerializeToElement(ResolutionPresets.Normalize(Settings.Resolution)),
+                Options = ResolutionPresets.All.Select(r => new UiSelectOption
+                {
+                    Label = r.Label,
+                    Value = JsonSerializer.SerializeToElement(r.Key)
+                }).ToList()
             });
         }
+
+        rightItems.Add(new UiItem
+        {
+            Key = "bitrate_mbps",
+            Type = "segmented",
+            Column = "right",
+            Stacked = true,
+            Label = "画质",
+            Subtitle = "同画质下，帧率越低单帧画面越清晰",
+            Value = JsonSerializer.SerializeToElement(ShareSettings.NormalizeBitrate(Settings.BitrateMbps)),
+            Options =
+            [
+                new() { Label = "2 Mbps", Value = JsonSerializer.SerializeToElement(2) },
+                new() { Label = "4 Mbps", Value = JsonSerializer.SerializeToElement(4) },
+                new() { Label = "6 Mbps", Value = JsonSerializer.SerializeToElement(6) }
+            ]
+        });
+
+        rightItems.Add(new UiItem
+        {
+            Key = "fps",
+            Type = "segmented",
+            Column = "right",
+            Stacked = true,
+            Label = "帧率",
+            Value = JsonSerializer.SerializeToElement(ShareSettings.NormalizeFps(Settings.Fps)),
+            Options =
+            [
+                new() { Label = "15 FPS", Value = JsonSerializer.SerializeToElement(15) },
+                new() { Label = "30 FPS", Value = JsonSerializer.SerializeToElement(30) },
+                new() { Label = "60 FPS", Value = JsonSerializer.SerializeToElement(60) }
+            ]
+        });
+
+        rightItems.Add(new UiItem
+        {
+            Key = "share_audio",
+            Type = "switch",
+            Column = "right",
+            Label = "共享声音",
+            Value = JsonSerializer.SerializeToElement(Settings.ShareAudio)
+        });
+
+        rightItems.Add(new UiItem
+        {
+            Key = "allow_control",
+            Type = "switch",
+            Column = "right",
+            Label = "允许远控",
+            Value = JsonSerializer.SerializeToElement(Settings.AllowRemoteControl)
+        });
+
+        rightItems.Add(new UiItem
+        {
+            Key = "share_status",
+            Type = "status",
+            Column = "right",
+            Label = "当前状态",
+            Value = JsonSerializer.SerializeToElement(BuildShareStatusText())
+        });
+
+        rightItems.Add(new UiItem
+        {
+            Key = "btn_toggle_share",
+            Type = "button",
+            Column = "right",
+            Primary = true,
+            Danger = _sharingEnabled,
+            Label = _sharingEnabled ? "停止共享" : "开始共享"
+        });
+
+        var shareItems = new List<UiItem>
+        {
+            new()
+            {
+                Key = "source_picker",
+                Type = "source_picker",
+                Column = "left",
+                ActiveTab = Settings.CaptureSource,
+                Value = JsonSerializer.SerializeToElement(SelectedSourceCardId()),
+                Tabs =
+                [
+                    new() { Label = "程序", Value = JsonSerializer.SerializeToElement("window") },
+                    new() { Label = "屏幕", Value = JsonSerializer.SerializeToElement("fullscreen") }
+                ],
+                Cards = BuildCurrentSourceCards()
+            }
+        };
+        shareItems.AddRange(rightItems);
 
         return new UiPageSchema
         {
@@ -575,120 +879,13 @@ internal static class Program
                 },
                 new UiSection
                 {
-                    Id = "host_control",
-                    Title = "本机共享控制",
-                    Items =
-                    [
-                        new UiItem { Key = "sharing_enabled", Type = "switch", Label = "开启桌面共享 (同组网免密直连)", Value = JsonSerializer.SerializeToElement(_sharingEnabled) },
-                        new UiItem { Key = "target_network", Type = "select", Label = "生效虚拟网络", Value = JsonSerializer.SerializeToElement(Settings.TargetNetworkId), Options = netOptions },
-                        new UiItem { Key = "share_audio", Type = "switch", Label = "传输系统音频 (WASAPI Loopback)", Value = JsonSerializer.SerializeToElement(Settings.ShareAudio) },
-                        new UiItem { Key = "allow_control", Type = "switch", Label = "开启被控 (允许远端键鼠控制本机)", Value = JsonSerializer.SerializeToElement(Settings.AllowRemoteControl) }
-                    ]
-                },
-                new UiSection
-                {
-                    Id = "capture",
-                    Title = "Capture 与编码设置",
-                    Items = BuildCaptureItems()
+                    Id = "screen_share",
+                    Title = "屏幕共享",
+                    Layout = "split",
+                    Items = shareItems
                 }
             ]
         };
-    }
-
-    private static List<UiItem> BuildCaptureItems()
-    {
-        var items = new List<UiItem>
-        {
-            new()
-            {
-                Key = "capture_source",
-                Type = "select",
-                Label = "捕获模式",
-                Value = JsonSerializer.SerializeToElement(Settings.CaptureSource),
-                Options =
-                [
-                    new() { Label = "全屏桌面", Value = JsonSerializer.SerializeToElement("fullscreen") },
-                    new() { Label = "指定窗口 (Window Capture)", Value = JsonSerializer.SerializeToElement("window") }
-                ]
-            }
-        };
-
-        if (Settings.CaptureSource == "window")
-        {
-            var winOptions = _capturableWindows.Count > 0
-                ? _capturableWindows.Select(w => new UiSelectOption
-                {
-                    Label = w.DisplayLabel,
-                    Value = JsonSerializer.SerializeToElement(w.Hwnd.ToString())
-                }).ToList()
-                : [new UiSelectOption { Label = "暂无可捕获窗口", Value = JsonSerializer.SerializeToElement("0") }];
-
-            items.Add(new UiItem
-            {
-                Key = "target_window",
-                Type = "select",
-                Label = "目标窗口 (自动使用 WGC)",
-                Value = JsonSerializer.SerializeToElement(Settings.TargetWindowHwnd.ToInt64().ToString()),
-                Options = winOptions
-            });
-            items.Add(new UiItem
-            {
-                Key = "btn_refresh_windows",
-                Type = "button",
-                Label = "刷新窗口列表"
-            });
-        }
-        else
-        {
-            items.Add(new UiItem
-            {
-                Key = "capture_api",
-                Type = "select",
-                Label = "Capture API",
-                Value = JsonSerializer.SerializeToElement(Settings.CaptureApi),
-                Options =
-                [
-                    new() { Label = "DXGI", Value = JsonSerializer.SerializeToElement("dxgi") },
-                    new() { Label = "WGC", Value = JsonSerializer.SerializeToElement("wgc") }
-                ]
-            });
-            items.Add(new UiItem
-            {
-                Key = "resolution",
-                Type = "select",
-                Label = "输出分辨率",
-                Value = JsonSerializer.SerializeToElement(ResolutionPresets.Normalize(Settings.Resolution)),
-                Options = ResolutionPresets.All.Select(r => new UiSelectOption
-                {
-                    Label = r.Label,
-                    Value = JsonSerializer.SerializeToElement(r.Key)
-                }).ToList()
-            });
-        }
-
-        items.Add(new UiItem
-        {
-            Key = "fps",
-            Type = "select",
-            Label = "目标帧率",
-            Value = JsonSerializer.SerializeToElement(Settings.Fps),
-            Options =
-            [
-                new() { Label = "60 FPS", Value = JsonSerializer.SerializeToElement(60) },
-                new() { Label = "30 FPS", Value = JsonSerializer.SerializeToElement(30) }
-            ]
-        });
-        items.Add(new UiItem
-        {
-            Key = "bitrate_mbps",
-            Type = "number",
-            Label = "目标码率 (Mbps)",
-            Value = JsonSerializer.SerializeToElement(Settings.BitrateMbps),
-            Min = 1,
-            Max = 50
-        });
-
-        return items;
     }
 
     private static UiPageSchema BuildViewerSchema() => new()
@@ -729,7 +926,10 @@ internal static class Program
             if (loaded is not null)
             {
                 loaded.Resolution = ResolutionPresets.Normalize(loaded.Resolution);
-                loaded.CaptureSource = loaded.CaptureSource == "window" ? "window" : "fullscreen";
+                loaded.CaptureSource = loaded.CaptureSource == "fullscreen" ? "fullscreen" : "window";
+                loaded.Fps = ShareSettings.NormalizeFps(loaded.Fps);
+                loaded.BitrateMbps = ShareSettings.NormalizeBitrate(loaded.BitrateMbps);
+                loaded.TargetNetworkId = "__all__";
                 Settings = loaded;
             }
         }

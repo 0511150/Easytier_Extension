@@ -26,19 +26,15 @@ public sealed class SourcedRegistryPlugin
 
 public sealed class MarketplaceService
 {
-    private const string LocalFallbackRegistry = "market/registry.json";
-
     private static readonly HttpClient Http = CreateHttpClient();
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
 
     private readonly string _baseDirectory;
-    private readonly string _bundledPluginsRoot;
     private readonly string _pluginsRoot;
 
     public MarketplaceService(string appBaseDirectory, string? userDataDirectory = null)
     {
         _baseDirectory = appBaseDirectory;
-        _bundledPluginsRoot = Path.Combine(appBaseDirectory, "plugins");
         _pluginsRoot = Path.Combine(userDataDirectory ?? appBaseDirectory, "plugins");
         Directory.CreateDirectory(_pluginsRoot);
     }
@@ -137,11 +133,7 @@ public sealed class MarketplaceService
     public List<InstalledPluginInfo> ScanInstalledPlugins(IReadOnlyDictionary<string, bool> savedStates)
     {
         var byId = new Dictionary<string, InstalledPluginInfo>(StringComparer.OrdinalIgnoreCase);
-        ScanDirectory(_bundledPluginsRoot, savedStates, byId);
-        if (!string.Equals(Path.GetFullPath(_bundledPluginsRoot), Path.GetFullPath(_pluginsRoot), StringComparison.OrdinalIgnoreCase))
-        {
-            ScanDirectory(_pluginsRoot, savedStates, byId);
-        }
+        ScanDirectory(_pluginsRoot, savedStates, byId);
         return [.. byId.Values];
     }
 
@@ -221,6 +213,7 @@ public sealed class MarketplaceService
     {
         RegistryIndex? index = null;
         string effectiveSourceUrl = officialSource.Url;
+        officialSource.LastLoadFailed = false;
 
         bool isPlaceholder = string.IsNullOrWhiteSpace(officialSource.Url) ||
                              officialSource.Url.Contains("github-owner", StringComparison.OrdinalIgnoreCase);
@@ -234,24 +227,13 @@ public sealed class MarketplaceService
             }
             catch
             {
+                officialSource.LastLoadFailed = true;
                 index = null;
             }
         }
-
-        if (index is null || index.Plugins.Count == 0)
+        else
         {
-            try
-            {
-                var fallback = await FetchRegistryAsync(LocalFallbackRegistry, ct).ConfigureAwait(false);
-                if (fallback.Plugins.Count > 0)
-                {
-                    index = fallback;
-                    effectiveSourceUrl = LocalFallbackRegistry;
-                }
-            }
-            catch
-            {
-            }
+            officialSource.LastLoadFailed = true;
         }
 
         index ??= new RegistryIndex();
@@ -303,6 +285,23 @@ public sealed class MarketplaceService
         return results.SelectMany(x => x).ToList();
     }
 
+    public static Uri ResolveDownloadUri(string downloadUrl, string registrySourceUrl)
+    {
+        if (Uri.TryCreate(downloadUrl, UriKind.Absolute, out var absUri) &&
+            (absUri.Scheme == Uri.UriSchemeHttp || absUri.Scheme == Uri.UriSchemeHttps))
+        {
+            return absUri;
+        }
+
+        if (Uri.TryCreate(registrySourceUrl, UriKind.Absolute, out var regUri) &&
+            (regUri.Scheme == Uri.UriSchemeHttp || regUri.Scheme == Uri.UriSchemeHttps))
+        {
+            return new Uri(regUri, downloadUrl);
+        }
+
+        throw new InvalidOperationException($"无法解析插件下载地址: {downloadUrl}");
+    }
+
     public Task<PluginManifest> InstallFromRegistryAsync(
         RegistryPluginEntry entry,
         string registrySource,
@@ -319,15 +318,12 @@ public sealed class MarketplaceService
         var tempZip = Path.Combine(Path.GetTempPath(), $"et_plugin_{Guid.NewGuid():N}.zip");
         try
         {
-            if (Uri.TryCreate(entry.DownloadUrl, UriKind.Absolute, out var absUri) &&
-                (absUri.Scheme == Uri.UriSchemeHttp || absUri.Scheme == Uri.UriSchemeHttps))
+            if ((Uri.TryCreate(entry.DownloadUrl, UriKind.Absolute, out var absUri) &&
+                 (absUri.Scheme == Uri.UriSchemeHttp || absUri.Scheme == Uri.UriSchemeHttps)) ||
+                (Uri.TryCreate(registrySource, UriKind.Absolute, out var regUri) &&
+                 (regUri.Scheme == Uri.UriSchemeHttp || regUri.Scheme == Uri.UriSchemeHttps)))
             {
-                await DownloadWithOptionalMirrorAsync(absUri.ToString(), tempZip, githubMirrorPrefix, progress, ct).ConfigureAwait(false);
-            }
-            else if (Uri.TryCreate(registrySource, UriKind.Absolute, out var regUri) &&
-                     (regUri.Scheme == Uri.UriSchemeHttp || regUri.Scheme == Uri.UriSchemeHttps))
-            {
-                var resolved = new Uri(regUri, entry.DownloadUrl);
+                var resolved = ResolveDownloadUri(entry.DownloadUrl, registrySource);
                 await DownloadWithOptionalMirrorAsync(resolved.ToString(), tempZip, githubMirrorPrefix, progress, ct).ConfigureAwait(false);
             }
             else
@@ -432,11 +428,6 @@ public sealed class MarketplaceService
         if (Directory.Exists(targetDir))
         {
             Directory.Delete(targetDir, recursive: true);
-        }
-        var bundledDir = Path.Combine(_bundledPluginsRoot, pluginId);
-        if (Directory.Exists(bundledDir))
-        {
-            try { Directory.Delete(bundledDir, recursive: true); } catch { }
         }
     }
 

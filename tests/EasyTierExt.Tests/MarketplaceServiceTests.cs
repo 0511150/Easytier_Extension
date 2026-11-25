@@ -101,4 +101,65 @@ public class MarketplaceServiceTests
             if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, true);
         }
     }
+
+    [Fact]
+    public void ResolveDownloadUri_ResolvesRelativePagesPackageUrl()
+    {
+        var resolved = MarketplaceService.ResolveDownloadUri(
+            "packages/screen-share-1.0.0.zip",
+            "https://0511150.github.io/Easytier_Extension_Registry/registry.json");
+
+        Assert.Equal(
+            "https://0511150.github.io/Easytier_Extension_Registry/packages/screen-share-1.0.0.zip",
+            resolved.ToString());
+    }
+
+    [Fact]
+    public void ScanInstalledPlugins_IgnoresBundledAppPluginsWhenUserDataDirectoryIsSeparate()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"et_scan_{Guid.NewGuid():N}");
+        var appBaseDir = Path.Combine(tempRoot, "app");
+        var userDataDir = Path.Combine(tempRoot, "userdata");
+        var bundledPlugDir = Path.Combine(appBaseDir, "plugins", "bundled-plug");
+        var userPlugDir = Path.Combine(userDataDir, "plugins", "user-plug");
+        Directory.CreateDirectory(bundledPlugDir);
+        Directory.CreateDirectory(userPlugDir);
+
+        try
+        {
+            var bundledManifest = new PluginManifest
+            {
+                Id = "bundled-plug",
+                Name = "预装插件",
+                Version = "1.0.0",
+                Entry = "Bundled.exe",
+                Menus = [new PluginMenuSpec { Id = "main", Title = "预装插件 - 主页" }]
+            };
+            File.WriteAllText(Path.Combine(bundledPlugDir, "manifest.json"), JsonSerializer.Serialize(bundledManifest));
+
+            var userManifest = new PluginManifest
+            {
+                Id = "user-plug",
+                Name = "中心插件",
+                Version = "1.0.0",
+                Entry = "User.exe",
+                Menus = [new PluginMenuSpec { Id = "main", Title = "中心插件 - 主页" }]
+            };
+            File.WriteAllText(Path.Combine(userPlugDir, "manifest.json"), JsonSerializer.Serialize(userManifest));
+
+            var svc = new MarketplaceService(appBaseDir, userDataDir);
+            var installed = svc.ScanInstalledPlugins(new Dictionary<string, bool>
+            {
+                ["bundled-plug"] = true,
+                ["user-plug"] = true
+            });
+
+            Assert.Single(installed);
+            Assert.Equal("user-plug", installed[0].Manifest.Id);
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, true);
+        }
+    }
 }

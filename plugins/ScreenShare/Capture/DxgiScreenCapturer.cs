@@ -8,6 +8,7 @@ public sealed class DxgiScreenCapturer : IScreenCapturer
 {
     private readonly ID3D11Device _device;
     private readonly ID3D11DeviceContext _context;
+    private readonly string? _targetDeviceName;
     private IDXGIOutputDuplication? _duplication;
     private ID3D11Texture2D? _copyTexture;
     private bool _disposed;
@@ -16,10 +17,11 @@ public sealed class DxgiScreenCapturer : IScreenCapturer
     public int Height { get; private set; }
     public bool IsTargetClosed => false;
 
-    public DxgiScreenCapturer(ID3D11Device device)
+    public DxgiScreenCapturer(ID3D11Device device, string? targetDeviceName = null)
     {
         _device = device;
         _context = device.ImmediateContext;
+        _targetDeviceName = targetDeviceName;
         InitializeDuplication();
     }
 
@@ -30,11 +32,41 @@ public sealed class DxgiScreenCapturer : IScreenCapturer
 
         using var dxgiDevice = _device.QueryInterface<IDXGIDevice>();
         using var adapter = dxgiDevice.GetAdapter();
-        adapter.EnumOutputs(0, out var output).CheckError();
-        using (output)
+        IDXGIOutput? selectedOutput = null;
+        for (uint idx = 0; adapter.EnumOutputs(idx, out var candidate).Success; idx++)
         {
-            using var output1 = output.QueryInterface<IDXGIOutput1>();
-            var desc = output.Description;
+            if (selectedOutput is null)
+            {
+                selectedOutput = candidate;
+            }
+            else if (!string.IsNullOrWhiteSpace(_targetDeviceName) &&
+                     string.Equals(candidate.Description.DeviceName, _targetDeviceName, StringComparison.OrdinalIgnoreCase))
+            {
+                selectedOutput.Dispose();
+                selectedOutput = candidate;
+                break;
+            }
+            else
+            {
+                candidate.Dispose();
+            }
+
+            if (!string.IsNullOrWhiteSpace(_targetDeviceName) &&
+                string.Equals(selectedOutput.Description.DeviceName, _targetDeviceName, StringComparison.OrdinalIgnoreCase))
+            {
+                break;
+            }
+        }
+
+        if (selectedOutput is null)
+        {
+            adapter.EnumOutputs(0, out selectedOutput).CheckError();
+        }
+
+        using (selectedOutput)
+        {
+            using var output1 = selectedOutput.QueryInterface<IDXGIOutput1>();
+            var desc = selectedOutput.Description;
             Width = desc.DesktopCoordinates.Right - desc.DesktopCoordinates.Left;
             Height = desc.DesktopCoordinates.Bottom - desc.DesktopCoordinates.Top;
             _duplication = output1.DuplicateOutput(_device);

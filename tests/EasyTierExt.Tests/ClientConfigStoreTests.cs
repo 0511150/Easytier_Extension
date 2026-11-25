@@ -27,7 +27,8 @@ public class ClientConfigStoreTests
         {
             var legacyStore = new ClientConfigStore(legacyDir);
             var cfg = legacyStore.Load();
-            cfg.Networks[0].NetworkName = "migrated-net";
+            var toml = cfg.Networks[0].ConfigToml;
+            NetworkConfigToml.Store(cfg.Networks[0], NetworkConfigToml.Apply(toml, NetworkConfigToml.Read(toml) with { NetworkName = "migrated-net" }));
             legacyStore.Save(cfg);
 
             var newStore = new ClientConfigStore(appDataDir, legacyDir);

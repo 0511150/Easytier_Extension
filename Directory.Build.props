@@ -3,6 +3,8 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
+    <Version Condition="'$(Version)' == ''">1.1.0</Version>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
   <PropertyGroup Condition="'$(GITHUB_ACTIONS)' != 'true' and '$(TEMP)' != ''">
     <BaseIntermediateOutputPath>$(TEMP)\EasytierExtWorkBuild\obj\$(MSBuildProjectName)\</BaseIntermediateOutputPath>

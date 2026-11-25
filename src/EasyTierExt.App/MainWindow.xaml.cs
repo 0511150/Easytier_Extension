@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using EasyTierExt.App.Controls;
 using EasyTierExt.App.Native;
@@ -8,6 +9,7 @@ using EasyTierExt.HostCore.Core;
 using EasyTierExt.HostCore.Discovery;
 using EasyTierExt.HostCore.Native;
 using EasyTierExt.HostCore.Plugins;
+using EasyTierExt.HostCore.Update;
 using Microsoft.UI;
 using Microsoft.UI.Text;
 using Microsoft.UI.Windowing;
@@ -60,6 +62,13 @@ public sealed partial class MainWindow : Window, IHostUiBridge
 
     private ToggleSwitch? _runOnStartupSwitch;
     private bool _suppressStartupSwitchEvents;
+    private Border? _globalSettingsHost;
+
+    private readonly ClientUpdateService _updateService = new();
+    private ClientUpdateCheckResult? _latestUpdate;
+    private bool _checkingUpdate;
+    private bool _applyingUpdate;
+    private string _updateStatusSummary = string.Empty;
 
     public MainWindow(bool startMinimized = false)
     {
@@ -71,6 +80,8 @@ public sealed partial class MainWindow : Window, IHostUiBridge
         // Window sizing & custom dark titlebar
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(DragTitleRegion);
+        AppVersionSubText.Text = $"with Extension · v{ClientUpdateService.GetCurrentVersion()}";
+        UpdateBannerPill.PointerPressed += (_, _) => NavigateTo("core:quick");
         AppWindow.Resize(new SizeInt32(1140, 740));
         if (AppWindow.TitleBar is { } tb)
         {
@@ -87,7 +98,7 @@ public sealed partial class MainWindow : Window, IHostUiBridge
         _selectedNetworkId = _config.Networks[0].NetworkId;
 
         _jobObject = new JobObjectManager();
-        _etManager = new EasyTierManager(_baseDir, _jobObject);
+        _etManager = new EasyTierManager(_baseDir, _jobObject, dataRootDirectory: appDataDir);
         _discovery = new DiscoveryService(
             () => _etManager.GetNetworkStatuses(_config.Networks),
             netId => _etManager.GetPeers(netId));
@@ -191,6 +202,7 @@ public sealed partial class MainWindow : Window, IHostUiBridge
         }
 
         NavigateTo("core:overview");
+        _ = CheckForClientUpdateAsync(manual: false);
     }
 
     private void RestoreFromTray()
@@ -247,12 +259,88 @@ public sealed partial class MainWindow : Window, IHostUiBridge
         Application.Current.Exit();
     }
 
+    private async Task CheckForClientUpdateAsync(bool manual)
+    {
+        if (_checkingUpdate) return;
+        _checkingUpdate = true;
+        RefreshGlobalSettingsCard();
+
+        try
+        {
+            var res = await _updateService.CheckForUpdateAsync();
+            _latestUpdate = res;
+            if (res.HasUpdate)
+            {
+                _updateStatusSummary = $"当前 v{res.CurrentVersion} · 发现新版本 v{res.LatestVersion}";
+                UpdateBannerText.Text = $"发现新版本 v{res.LatestVersion} · 点击更新";
+                UpdateBannerPill.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                _updateStatusSummary = $"当前 v{res.CurrentVersion}（已是最新）";
+                UpdateBannerPill.Visibility = Visibility.Collapsed;
+            }
+        }
+        catch (Exception ex)
+        {
+            if (manual)
+            {
+                _updateStatusSummary = $"当前 v{ClientUpdateService.GetCurrentVersion()} · 检查失败";
+                await ShowMessageAsync("检查更新失败", ex.Message);
+            }
+        }
+        finally
+        {
+            _checkingUpdate = false;
+            RefreshGlobalSettingsCard();
+        }
+    }
+
+    private async Task ApplyClientUpdateAndRestartAsync(Button triggerBtn)
+    {
+        if (_applyingUpdate || _latestUpdate is null || !_latestUpdate.HasUpdate) return;
+        _applyingUpdate = true;
+        triggerBtn.IsEnabled = false;
+        triggerBtn.Content = "准备下载...";
+
+        var progress = new Progress<double>(pct =>
+            DispatcherQueue.TryEnqueue(() => triggerBtn.Content = $"下载中 {(int)pct}%"));
+
+        try
+        {
+            var staged = await _updateService.DownloadAndStageUpdateAsync(
+                _latestUpdate,
+                _config.GithubMirrorPrefix,
+                progress);
+
+            triggerBtn.Content = "正在重启更新...";
+            _isExitingForReal = true;
+            _viewportController.Dispose();
+            await _pluginManager.DisposeAsync();
+            await _discovery.DisposeAsync();
+            await _etManager.DisposeAsync();
+            _trayIcon.Dispose();
+            _jobObject.Dispose();
+
+            _updateService.LaunchUpdaterScript(staged, _baseDir, Environment.ProcessId);
+            Close();
+            Application.Current.Exit();
+        }
+        catch (Exception ex)
+        {
+            _applyingUpdate = false;
+            triggerBtn.IsEnabled = true;
+            triggerBtn.Content = $"更新至 v{_latestUpdate.LatestVersion} 并重启";
+            await ShowMessageAsync("更新失败", ex.Message);
+        }
+    }
+
     #region Sidebar Navigation
 
     private void BuildStaticMenus()
     {
         AddNavButton(CoreMenuPanel, "core:overview", "网络概览");
-        AddNavButton(CoreMenuPanel, "core:quick", "快速组网");
+        AddNavButton(CoreMenuPanel, "core:quick", "网络配置");
         AddNavButton(MarketMenuPanel, "market:main", "插件中心");
     }
 
@@ -365,6 +453,7 @@ public sealed partial class MainWindow : Window, IHostUiBridge
         if (_activeRoute != "core:quick")
         {
             _runOnStartupSwitch = null;
+            _globalSettingsHost = null;
         }
 
         if (!_activeRoute.StartsWith("plugin:", StringComparison.Ordinal))
@@ -381,8 +470,8 @@ public sealed partial class MainWindow : Window, IHostUiBridge
             }
             else if (_activeRoute == "core:quick")
             {
-                PageTitleText.Text = "快速组网";
-                RenderQuickSetupPage();
+                PageTitleText.Text = "网络配置";
+                RenderNetworkConfigPage();
             }
             else if (_activeRoute == "market:main")
             {
@@ -622,7 +711,9 @@ public sealed partial class MainWindow : Window, IHostUiBridge
         if (_overviewPeerRowsPanel is null) return;
 
         _overviewPeerRowsPanel.Children.Clear();
-        var peers = _etManager.GetPeers(_peerFilterNetworkId == "__all__" ? null : _peerFilterNetworkId, includeSelf: true);
+        var peers = _etManager.GetPeers(_peerFilterNetworkId == "__all__" ? null : _peerFilterNetworkId, includeSelf: true)
+            .Where(EasyTierManager.IsVisiblePeer)
+            .ToList();
         if (peers.Count == 0)
         {
             _overviewPeerRowsPanel.Children.Add(new TextBlock
@@ -645,96 +736,285 @@ public sealed partial class MainWindow : Window, IHostUiBridge
     }
 
 
-    private void RenderQuickSetupPage()
+    private void RenderNetworkConfigPage()
     {
         var profile = GetSelectedProfile();
+        NetworkConfigToml.EnsureGenerated(profile);
         var stack = new StackPanel { Spacing = 14 };
-
-        var globalCard = CreateCard("客户端全局设置");
-        var globalStack = (StackPanel)globalCard.Child;
-        _runOnStartupSwitch = new ToggleSwitch
-        {
-            IsOn = _config.RunOnStartup,
-            OnContent = "开启",
-            OffContent = "关闭",
-            MinWidth = 0
-        };
-        _runOnStartupSwitch.Toggled += (_, _) =>
-        {
-            if (_suppressStartupSwitchEvents || _runOnStartupSwitch is null) return;
-            _ = ApplyRunOnStartupAsync(_runOnStartupSwitch.IsOn, showErrorDialog: true);
-        };
-        globalStack.Children.Add(OptionRow("开机自启动 (登录系统后静默驻留托盘)", _runOnStartupSwitch));
-        stack.Children.Add(globalCard);
-
         stack.Children.Add(CreateNetworkSelectorBar());
 
-        var card = CreateCard("基础组网参数 (LuCI 快速配置)");
+        var card = CreateCard("普通设置");
         var cardStack = (StackPanel)card.Child;
 
-        var displayBox = new TextBox { Text = profile.DisplayName, MinWidth = 260 };
-        var nameBox = new TextBox { Text = profile.NetworkName, MinWidth = 260 };
-        var secretBox = new TextBox { Text = profile.NetworkSecret, MinWidth = 260 };
+        var displayBox = new TextBox { Text = profile.DisplayName, MinWidth = 320 };
+        var peerBox = new TextBox { MinWidth = 320, MaxWidth = 520, PlaceholderText = "tcp://host:11010，多个用逗号分隔" };
+        var nameBox = new TextBox { MinWidth = 320 };
+        var secretBox = new TextBox { MinWidth = 320 };
+        var hostBox = new TextBox { MinWidth = 320, PlaceholderText = Environment.MachineName };
 
-        var modeCombo = new ComboBox { MinWidth = 260 };
-        modeCombo.Items.Add(new ComboBoxItem { Content = "公共服务器发现 (推荐)", Tag = "public" });
-        modeCombo.Items.Add(new ComboBoxItem { Content = "手动指定 Peer 节点", Tag = "manual" });
-        modeCombo.Items.Add(new ComboBoxItem { Content = "仅本地监听 (独立建网)", Tag = "standalone" });
-        modeCombo.SelectedIndex = profile.ConnectionMode switch { "manual" => 1, "standalone" => 2, _ => 0 };
+        var ipModeCombo = new ComboBox { MinWidth = 150 };
+        ipModeCombo.Items.Add(new ComboBoxItem { Content = "DHCP 自动获取" });
+        ipModeCombo.Items.Add(new ComboBoxItem { Content = "静态 IPv4" });
+        var staticIpBox = new TextBox { Text = profile.StaticIpv4, MinWidth = 162, PlaceholderText = "10.10.10.10/24" };
+        var addressPanel = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, VerticalAlignment = VerticalAlignment.Center };
+        addressPanel.Children.Add(staticIpBox);
+        addressPanel.Children.Add(ipModeCombo);
 
-        var serverBox = new TextBox
-        {
-            Text = profile.ConnectionMode == "manual" ? string.Join(", ", profile.PeerUrls) : profile.PublicServer,
-            MinWidth = 320,
-            PlaceholderText = "tcp://public.easytier.top:11010"
-        };
+        var protocolCombo = new ComboBox { MinWidth = 150 };
+        protocolCombo.Items.Add(new ComboBoxItem { Content = "Default", Tag = NetworkFormValues.ProtocolDefault });
+        protocolCombo.Items.Add(new ComboBoxItem { Content = "KCP", Tag = NetworkFormValues.ProtocolKcp });
+        protocolCombo.Items.Add(new ComboBoxItem { Content = "QUIC", Tag = NetworkFormValues.ProtocolQuic });
 
-        var ipModeCombo = new ComboBox { MinWidth = 260 };
-        ipModeCombo.Items.Add(new ComboBoxItem { Content = "DHCP 自动获取", Tag = "dhcp" });
-        ipModeCombo.Items.Add(new ComboBoxItem { Content = "静态指定 IPv4", Tag = "static" });
-        ipModeCombo.SelectedIndex = profile.Ipv4Mode == "static" ? 1 : 0;
-
-        var staticIpBox = new TextBox { Text = profile.StaticIpv4, MinWidth = 260, PlaceholderText = "10.10.10.10/24" };
-        var hostBox = new TextBox { Text = profile.Hostname, MinWidth = 260 };
-        var autoSwitch = new ToggleSwitch { IsOn = profile.AutoStart, OnContent = "是", OffContent = "否", MinWidth = 0 };
+        var compatSwitch = new ToggleSwitch { OnContent = "开启", OffContent = "关闭", MinWidth = 0 };
+        ToolTipService.SetToolTip(compatSwitch, "为子网代理和 KCP 代理开启用户网络栈，并绑定物理网卡");
 
         cardStack.Children.Add(OptionRow("配置名称", displayBox));
-        cardStack.Children.Add(OptionRow("网络名称 (Network Name)", nameBox));
-        cardStack.Children.Add(OptionRow("网络密钥 (Secret)", secretBox));
-        cardStack.Children.Add(OptionRow("连接方式", modeCombo));
-        cardStack.Children.Add(OptionRow("服务器 / Peer 地址", serverBox));
-        cardStack.Children.Add(OptionRow("虚拟 IP 模式", ipModeCombo));
-        cardStack.Children.Add(OptionRow("静态 IPv4 (CIDR)", staticIpBox));
-        cardStack.Children.Add(OptionRow("本机节点名", hostBox));
-        cardStack.Children.Add(OptionRow("随软件自动启动", autoSwitch));
+        cardStack.Children.Add(OptionRow("Peer 地址", peerBox));
+        cardStack.Children.Add(OptionRow("网络名称", nameBox));
+        cardStack.Children.Add(OptionRow("网络密钥", secretBox));
+        cardStack.Children.Add(OptionRow("节点名", hostBox));
+        cardStack.Children.Add(OptionRow("地址", addressPanel));
+        cardStack.Children.Add(OptionRow("协议", protocolCombo));
+        cardStack.Children.Add(OptionRow("联机兼容", compatSwitch));
 
-        // Hidden / Collapsed Advanced Settings inside Quick Setup
-        var cidrBox = new TextBox { Text = string.Join(", ", profile.ProxyCidrs), MinWidth = 300, PlaceholderText = "如: 192.168.10.0/24" };
-        var listenerBox = new TextBox { Text = string.Join(", ", profile.Listeners), MinWidth = 300, PlaceholderText = "tcp://0.0.0.0:11010, udp://0.0.0.0:11010" };
-        var encOff = new ToggleSwitch { IsOn = profile.DisableEncryption, OnContent = "禁用", OffContent = "启用", MinWidth = 0 };
-        var encAlg = new ComboBox { MinWidth = 200 };
-        foreach (var alg in new[] { "aes-gcm", "aes-256-gcm", "chacha20", "xor" }) encAlg.Items.Add(alg);
-        encAlg.SelectedItem = profile.EncryptionAlgorithm;
-        if (encAlg.SelectedIndex < 0) encAlg.SelectedIndex = 0;
+        // 高级设置：直接编辑 EasyTier TOML 配置
+        var tomlBox = new TextBox
+        {
+            AcceptsReturn = true,
+            Height = 340,
+            FontFamily = new FontFamily("Consolas"),
+            FontSize = 12.5,
+            IsSpellCheckEnabled = false,
+            TextWrapping = TextWrapping.NoWrap,
+            Text = profile.ConfigToml
+        };
+        ScrollViewer.SetVerticalScrollBarVisibility(tomlBox, ScrollBarVisibility.Auto);
+        ScrollViewer.SetHorizontalScrollBarVisibility(tomlBox, ScrollBarVisibility.Auto);
+        var tomlError = new TextBlock
+        {
+            FontSize = 12.5,
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = new SolidColorBrush(Color.FromArgb(255, 248, 113, 113)),
+            Visibility = Visibility.Collapsed
+        };
 
-        var devNameBox = new TextBox { Text = profile.DevName, MinWidth = 200, PlaceholderText = $"默认 et_{profile.NetworkId}" };
-        var mtuBox = new NumberBox { Minimum = 1200, Maximum = 1500, Value = Math.Clamp(profile.Mtu, 1200, 1500), MinWidth = 200, SpinButtonPlacementMode = NumberBoxSpinButtonPlacementMode.Inline };
-        var latFirst = new ToggleSwitch { IsOn = profile.LatencyFirst, OnContent = "开启", OffContent = "关闭", MinWidth = 0 };
-        var kcpProxy = new ToggleSwitch { IsOn = profile.EnableKcpProxy, OnContent = "开启", OffContent = "关闭", MinWidth = 0 };
-        var quicProxy = new ToggleSwitch { IsOn = profile.EnableQuicProxy, OnContent = "开启", OffContent = "关闭", MinWidth = 0 };
-        var noTun = new ToggleSwitch { IsOn = profile.NoTun, OnContent = "开启", OffContent = "关闭", MinWidth = 0 };
+        string GetToml() => tomlBox.Text.Replace("\r\n", "\n").Replace('\r', '\n');
+
+        NetworkFormValues ReadForm() => new()
+        {
+            Peers = peerBox.Text.Split([',', '，'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+            NetworkName = nameBox.Text.Trim(),
+            NetworkSecret = secretBox.Text.Trim(),
+            Hostname = hostBox.Text.Trim(),
+            Dhcp = ipModeCombo.SelectedIndex != 1,
+            StaticIpv4 = NetworkConfigToml.NormalizeIpv4(staticIpBox.Text),
+            Protocol = (protocolCombo.SelectedItem as ComboBoxItem)?.Tag as string ?? NetworkFormValues.ProtocolDefault,
+            GameCompat = compatSwitch.IsOn
+        };
+
+        void ShowTomlError(string? message)
+        {
+            tomlError.Text = message is null ? string.Empty : $"config 有误，暂时无法与普通设置同步：{message}";
+            tomlError.Visibility = message is null ? Visibility.Collapsed : Visibility.Visible;
+        }
+
+        // TextChanged 是异步触发的，因此记录“最后一次由程序写入的内容”来忽略自身引发的事件，
+        // 避免快速输入时表单与 TOML 互相覆盖。
+        string? tomlWrittenByForm = null;
+        NetworkFormValues? formWrittenByToml = null;
+        bool writingForm = false;
+
+        void WriteForm(NetworkFormValues v)
+        {
+            writingForm = true;
+            try
+            {
+                peerBox.Text = string.Join(", ", v.Peers);
+                nameBox.Text = v.NetworkName;
+                secretBox.Text = v.NetworkSecret;
+                hostBox.Text = v.Hostname;
+                ipModeCombo.SelectedIndex = v.Dhcp ? 0 : 1;
+                if (!v.Dhcp || v.StaticIpv4.Length > 0) staticIpBox.Text = v.StaticIpv4;
+                protocolCombo.SelectedIndex = v.Protocol switch
+                {
+                    NetworkFormValues.ProtocolKcp => 1,
+                    NetworkFormValues.ProtocolQuic => 2,
+                    _ => 0
+                };
+                compatSwitch.IsOn = v.GameCompat;
+            }
+            finally
+            {
+                writingForm = false;
+            }
+            formWrittenByToml = ReadForm();
+            UpdateAddressBox();
+        }
+
+        void UpdateAddressBox() =>
+            staticIpBox.Visibility = ipModeCombo.SelectedIndex == 1 ? Visibility.Visible : Visibility.Collapsed;
+
+        void OnTomlChanged()
+        {
+            var toml = GetToml();
+            if (toml == tomlWrittenByForm) return;
+            tomlWrittenByForm = null;
+            try
+            {
+                var values = NetworkConfigToml.Read(toml);
+                ShowTomlError(null);
+                if (!values.SameAs(ReadForm())) WriteForm(values);
+            }
+            catch (FormatException ex)
+            {
+                ShowTomlError(ex.Message);
+            }
+        }
+
+        void OnFormChanged()
+        {
+            if (writingForm) return;
+            UpdateAddressBox();
+            var form = ReadForm();
+            if (formWrittenByToml is not null && form.SameAs(formWrittenByToml)) return;
+            formWrittenByToml = null;
+            try
+            {
+                var toml = GetToml();
+                var updated = NetworkConfigToml.Apply(toml, form);
+                ShowTomlError(null);
+                if (updated != toml)
+                {
+                    tomlWrittenByForm = updated;
+                    tomlBox.Text = updated;
+                }
+            }
+            catch (FormatException ex)
+            {
+                ShowTomlError(ex.Message);
+            }
+        }
+
+        try
+        {
+            WriteForm(NetworkConfigToml.Read(profile.ConfigToml));
+        }
+        catch (FormatException ex)
+        {
+            ShowTomlError(ex.Message);
+        }
+        formWrittenByToml = ReadForm();
+        UpdateAddressBox();
+
+        foreach (var box in new[] { peerBox, nameBox, secretBox, hostBox, staticIpBox })
+        {
+            box.TextChanged += (_, _) => OnFormChanged();
+        }
+        ipModeCombo.SelectionChanged += (_, _) => OnFormChanged();
+        protocolCombo.SelectionChanged += (_, _) => OnFormChanged();
+        compatSwitch.Toggled += (_, _) => OnFormChanged();
+        tomlBox.TextChanged += (_, _) => OnTomlChanged();
+
+        var autoCheck = new CheckBox { Content = "随软件自动启动", IsChecked = profile.AutoStart, MinWidth = 0 };
+
+        async Task<bool> SaveAsync()
+        {
+            try
+            {
+                var toml = GetToml();
+                NetworkConfigToml.Read(toml);
+                if (!await _etManager.CheckConfigAsync(toml))
+                {
+                    throw new FormatException("EasyTier 核心无法解析该配置，请检查高级设置中的 TOML 内容。");
+                }
+                NetworkConfigToml.Store(profile, toml);
+            }
+            catch (Exception ex)
+            {
+                await ShowMessageAsync("配置有误，未保存", ex.Message);
+                return false;
+            }
+
+            profile.DisplayName = displayBox.Text.Trim();
+            profile.AutoStart = autoCheck.IsChecked == true;
+            _configStore.Save(_config);
+
+            // 保存时可能补全了网卡名称等默认项
+            if (GetToml() != profile.ConfigToml)
+            {
+                tomlWrittenByForm = profile.ConfigToml;
+                tomlBox.Text = profile.ConfigToml;
+            }
+            return true;
+        }
+
+        async Task SaveAndNotifyAsync()
+        {
+            if (await SaveAsync())
+            {
+                await ShowMessageAsync("已保存", $"网络 '{profile.DisplayName}' 配置已保存。");
+            }
+        }
+
+        async Task SaveAndConnectAsync()
+        {
+            if (!await SaveAsync()) return;
+            try
+            {
+                await _etManager.StartNetworkAsync(profile, () => _config.Networks);
+                NavigateTo("core:overview");
+            }
+            catch (Exception ex)
+            {
+                await ShowMessageAsync("启动失败", ex.Message);
+            }
+        }
+
+        StackPanel CreateSaveBar()
+        {
+            var bar = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Margin = new Thickness(0, 6, 0, 0) };
+            var saveBtn = new Button { Content = "保存配置" };
+            saveBtn.Click += async (_, _) => await SaveAndNotifyAsync();
+            var saveAndStartBtn = new Button
+            {
+                Content = "保存并连接",
+                Background = new SolidColorBrush(Color.FromArgb(255, 124, 92, 255)),
+                Foreground = new SolidColorBrush(Colors.White)
+            };
+            saveAndStartBtn.Click += async (_, _) => await SaveAndConnectAsync();
+            bar.Children.Add(saveBtn);
+            bar.Children.Add(saveAndStartBtn);
+            return bar;
+        }
+
+        var btnBar = CreateSaveBar();
+        btnBar.Children.Add(autoCheck);
+        cardStack.Children.Add(btnBar);
+        stack.Children.Add(card);
+
+        _globalSettingsHost = new Border();
+        stack.Children.Add(_globalSettingsHost);
+        RefreshGlobalSettingsCard();
+
+        var tipPanel = new StackPanel { Spacing = 2 };
+        tipPanel.Children.Add(new TextBlock
+        {
+            Text = "直接修改 EasyTier 的 config (TOML)。可在下方网站中调整配置后粘贴到此处：",
+            FontSize = 12.5,
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = new SolidColorBrush(Color.FromArgb(255, 156, 163, 175))
+        });
+        tipPanel.Children.Add(new HyperlinkButton
+        {
+            Content = NetworkConfigToml.AssistantUrl,
+            NavigateUri = new Uri(NetworkConfigToml.AssistantUrl),
+            Padding = new Thickness(0, 2, 0, 2)
+        });
 
         var advStack = new StackPanel { Spacing = 10, Padding = new Thickness(0, 6, 0, 2) };
-        advStack.Children.Add(OptionRow("子网代理 CIDR (逗号分隔)", cidrBox));
-        advStack.Children.Add(OptionRow("本地监听地址 (逗号分隔)", listenerBox));
-        advStack.Children.Add(OptionRow("禁用传输加密", encOff));
-        advStack.Children.Add(OptionRow("加密算法", encAlg));
-        advStack.Children.Add(OptionRow("TUN 网卡名称", devNameBox));
-        advStack.Children.Add(OptionRow("MTU 大小", mtuBox));
-        advStack.Children.Add(OptionRow("延迟优先路由", latFirst));
-        advStack.Children.Add(OptionRow("启用 KCP TCP 代理", kcpProxy));
-        advStack.Children.Add(OptionRow("启用 QUIC TCP 代理", quicProxy));
-        advStack.Children.Add(OptionRow("无 TUN 模式 (仅转发)", noTun));
+        advStack.Children.Add(tipPanel);
+        advStack.Children.Add(tomlBox);
+        advStack.Children.Add(CreateSaveBar());
 
         var advExpander = new Expander
         {
@@ -746,72 +1026,8 @@ public sealed partial class MainWindow : Window, IHostUiBridge
             BorderBrush = new SolidColorBrush(Color.FromArgb(255, 46, 46, 53)),
             Content = advStack
         };
-
-        void SaveForm()
-        {
-            profile.DisplayName = displayBox.Text.Trim();
-            profile.NetworkName = nameBox.Text.Trim();
-            profile.NetworkSecret = secretBox.Text.Trim();
-            profile.ConnectionMode = ((ComboBoxItem)modeCombo.SelectedItem!).Tag?.ToString() ?? "public";
-            if (profile.ConnectionMode == "manual")
-            {
-                profile.PeerUrls = serverBox.Text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
-            }
-            else
-            {
-                profile.PublicServer = serverBox.Text.Trim();
-            }
-            profile.Ipv4Mode = ((ComboBoxItem)ipModeCombo.SelectedItem!).Tag?.ToString() ?? "dhcp";
-            profile.StaticIpv4 = staticIpBox.Text.Trim();
-            profile.Hostname = hostBox.Text.Trim();
-            profile.AutoStart = autoSwitch.IsOn;
-
-            profile.ProxyCidrs = cidrBox.Text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
-            profile.Listeners = listenerBox.Text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
-            profile.DisableEncryption = encOff.IsOn;
-            profile.EncryptionAlgorithm = encAlg.SelectedItem?.ToString() ?? "aes-gcm";
-            profile.DevName = devNameBox.Text.Trim();
-            profile.Mtu = double.IsNaN(mtuBox.Value) ? 1360 : (int)mtuBox.Value;
-            profile.LatencyFirst = latFirst.IsOn;
-            profile.EnableKcpProxy = kcpProxy.IsOn;
-            profile.EnableQuicProxy = quicProxy.IsOn;
-            profile.NoTun = noTun.IsOn;
-
-            _configStore.Save(_config);
-        }
-
-        var btnBar = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Margin = new Thickness(0, 6, 0, 0) };
-        var saveBtn = new Button { Content = "保存配置" };
-        saveBtn.Click += async (_, _) =>
-        {
-            SaveForm();
-            await ShowMessageAsync("已保存", $"网络 '{profile.DisplayName}' 配置已保存。");
-        };
-        var saveAndStartBtn = new Button
-        {
-            Content = "保存并连接",
-            Background = new SolidColorBrush(Color.FromArgb(255, 124, 92, 255)),
-            Foreground = new SolidColorBrush(Colors.White)
-        };
-        saveAndStartBtn.Click += async (_, _) =>
-        {
-            SaveForm();
-            try
-            {
-                await _etManager.StartNetworkAsync(profile, () => _config.Networks);
-                NavigateTo("core:overview");
-            }
-            catch (Exception ex)
-            {
-                await ShowMessageAsync("启动失败", ex.Message);
-            }
-        };
-        btnBar.Children.Add(saveBtn);
-        btnBar.Children.Add(saveAndStartBtn);
-        cardStack.Children.Add(btnBar);
-
-        stack.Children.Add(card);
         stack.Children.Add(advExpander);
+        stack.Children.Add(tomlError);
 
         // Logs at the very bottom of Settings
         var logCard = CreateCard($"核心运行日志 ({profile.DisplayName})");
@@ -840,6 +1056,106 @@ public sealed partial class MainWindow : Window, IHostUiBridge
         ContentHost.Children.Add(new ScrollViewer { Content = stack });
     }
 
+    private void RefreshGlobalSettingsCard()
+    {
+        if (_globalSettingsHost is null) return;
+
+        var globalCard = CreateCard("客户端全局设置");
+        var globalStack = (StackPanel)globalCard.Child;
+        _runOnStartupSwitch = new ToggleSwitch
+        {
+            IsOn = _config.RunOnStartup,
+            OnContent = "开启",
+            OffContent = "关闭",
+            MinWidth = 0
+        };
+        _runOnStartupSwitch.Toggled += (_, _) =>
+        {
+            if (_suppressStartupSwitchEvents || _runOnStartupSwitch is null) return;
+            _ = ApplyRunOnStartupAsync(_runOnStartupSwitch.IsOn, showErrorDialog: true);
+        };
+        globalStack.Children.Add(OptionRow("开机自启动 (登录系统后静默驻留托盘)", _runOnStartupSwitch));
+
+        var currentVer = ClientUpdateService.GetCurrentVersion();
+        var verSummary = !string.IsNullOrWhiteSpace(_updateStatusSummary)
+            ? _updateStatusSummary
+            : $"当前版本 v{currentVer}";
+        var updateActions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, VerticalAlignment = VerticalAlignment.Center };
+        updateActions.Children.Add(new TextBlock
+        {
+            Text = verSummary,
+            FontSize = 12.5,
+            VerticalAlignment = VerticalAlignment.Center,
+            Foreground = new SolidColorBrush(_latestUpdate?.HasUpdate == true
+                ? Color.FromArgb(255, 196, 181, 253)
+                : Color.FromArgb(255, 156, 163, 175))
+        });
+
+        var checkUpdateBtn = new Button
+        {
+            Content = _checkingUpdate ? "检查中..." : "检查更新",
+            IsEnabled = !_checkingUpdate && !_applyingUpdate
+        };
+        checkUpdateBtn.Click += async (_, _) => await CheckForClientUpdateAsync(manual: true);
+        updateActions.Children.Add(checkUpdateBtn);
+
+        if (_latestUpdate?.HasUpdate == true)
+        {
+            if (!string.IsNullOrWhiteSpace(_latestUpdate.DownloadUrl))
+            {
+                var applyBtn = new Button
+                {
+                    Content = _applyingUpdate ? "正在更新..." : $"更新至 v{_latestUpdate.LatestVersion} 并重启",
+                    IsEnabled = !_applyingUpdate,
+                    Background = new SolidColorBrush(Color.FromArgb(255, 124, 92, 255)),
+                    Foreground = new SolidColorBrush(Colors.White)
+                };
+                applyBtn.Click += async (_, _) => await ApplyClientUpdateAndRestartAsync(applyBtn);
+                updateActions.Children.Add(applyBtn);
+            }
+            else
+            {
+                var openReleaseBtn = new Button
+                {
+                    Content = $"前往 Release v{_latestUpdate.LatestVersion}",
+                    Background = new SolidColorBrush(Color.FromArgb(255, 124, 92, 255)),
+                    Foreground = new SolidColorBrush(Colors.White)
+                };
+                openReleaseBtn.Click += (_, _) =>
+                {
+                    try
+                    {
+                        Process.Start(new ProcessStartInfo(_latestUpdate.HtmlUrl) { UseShellExecute = true });
+                    }
+                    catch { }
+                };
+                updateActions.Children.Add(openReleaseBtn);
+            }
+        }
+
+        globalStack.Children.Add(OptionRow("软件版本与更新 (GitHub)", updateActions));
+
+        if (_latestUpdate?.HasUpdate == true && !string.IsNullOrWhiteSpace(_latestUpdate.ReleaseNotes))
+        {
+            globalStack.Children.Add(new Border
+            {
+                Background = new SolidColorBrush(Color.FromArgb(255, 26, 26, 32)),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(255, 55, 50, 82)),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(6),
+                Padding = new Thickness(12, 8, 12, 8),
+                Child = new TextBlock
+                {
+                    Text = $"v{_latestUpdate.LatestVersion} 更新说明：\n{_latestUpdate.ReleaseNotes}",
+                    FontSize = 12,
+                    TextWrapping = TextWrapping.Wrap,
+                    Foreground = new SolidColorBrush(Color.FromArgb(255, 209, 213, 219))
+                }
+            });
+        }
+
+        _globalSettingsHost.Child = globalCard;
+    }
 
     private void RenderMarketplacePage()
     {
@@ -1122,9 +1438,15 @@ public sealed partial class MainWindow : Window, IHostUiBridge
             }
             else
             {
+                var officialFailed = _activeMarketTab == "official"
+                    && string.IsNullOrEmpty(query)
+                    && _marketSelectedCategory == "__all__"
+                    && (_config.MarketplaceSources.FirstOrDefault(s => s.IsOfficial)?.LastLoadFailed == true);
                 _marketCardsContainer.Children.Add(new TextBlock
                 {
-                    Text = "暂无匹配的插件",
+                    Text = officialFailed
+                        ? "无法连接官方插件商店，请检查网络后点击右上角「刷新」重试"
+                        : "暂无匹配的插件",
                     Foreground = new SolidColorBrush(Color.FromArgb(255, 107, 114, 128)),
                     Margin = new Thickness(4, 12, 4, 4)
                 });
@@ -1351,12 +1673,12 @@ public sealed partial class MainWindow : Window, IHostUiBridge
     private async Task ShowSourceManagerDialogAsync()
     {
         _config.EnsureSourcesNormalized();
-        var rootPanel = new StackPanel { Spacing = 14, MinWidth = 540 };
+        var rootPanel = new StackPanel { Spacing = 14, HorizontalAlignment = HorizontalAlignment.Stretch };
 
         ContentDialog? dialog = null;
 
         // Header
-        var headerGrid = new Grid();
+        var headerGrid = new Grid { ColumnSpacing = 12 };
         headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
@@ -1370,11 +1692,11 @@ public sealed partial class MainWindow : Window, IHostUiBridge
         });
         headerText.Children.Add(new TextBlock
         {
-            Text = "管理插件商店及订阅来源",
+            Text = "管理第三方插件订阅来源",
             FontSize = 12.5,
             Foreground = new SolidColorBrush(Color.FromArgb(255, 156, 163, 175))
         });
-        var closeXBtn = new Button { Content = "×", Padding = new Thickness(10, 4, 10, 4) };
+        var closeXBtn = new Button { Content = "×", Padding = new Thickness(10, 4, 10, 4), VerticalAlignment = VerticalAlignment.Top };
         closeXBtn.Click += (_, _) => dialog?.Hide();
         Grid.SetColumn(headerText, 0);
         Grid.SetColumn(closeXBtn, 1);
@@ -1382,62 +1704,8 @@ public sealed partial class MainWindow : Window, IHostUiBridge
         headerGrid.Children.Add(closeXBtn);
         rootPanel.Children.Add(headerGrid);
 
-        // Built-in official source
-        var official = _config.MarketplaceSources.First(s => s.IsOfficial);
-        rootPanel.Children.Add(new TextBlock
-        {
-            Text = "内置来源",
-            FontSize = 13,
-            FontWeight = FontWeights.SemiBold,
-            Foreground = new SolidColorBrush(Color.FromArgb(255, 209, 213, 219))
-        });
-
-        var officialCard = new Border
-        {
-            Background = new SolidColorBrush(Color.FromArgb(255, 34, 34, 38)),
-            BorderBrush = new SolidColorBrush(Color.FromArgb(255, 46, 46, 53)),
-            BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(8),
-            Padding = new Thickness(14, 12, 14, 12)
-        };
-        var officialStack = new StackPanel { Spacing = 4 };
-        var offTop = new Grid();
-        offTop.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        offTop.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        offTop.Children.Add(new TextBlock
-        {
-            Text = official.Name,
-            FontWeight = FontWeights.SemiBold,
-            Foreground = new SolidColorBrush(Color.FromArgb(255, 243, 244, 246))
-        });
-        var offBadge = new Border
-        {
-            Background = new SolidColorBrush(Color.FromArgb(255, 30, 58, 42)),
-            CornerRadius = new CornerRadius(6),
-            Padding = new Thickness(8, 3, 8, 3),
-            Child = new TextBlock { Text = "已启用", FontSize = 11.5, Foreground = new SolidColorBrush(Color.FromArgb(255, 74, 222, 128)) }
-        };
-        Grid.SetColumn(offBadge, 1);
-        offTop.Children.Add(offBadge);
-        officialStack.Children.Add(offTop);
-        officialStack.Children.Add(new TextBlock
-        {
-            Text = "官方内置 · 不可移除",
-            FontSize = 12,
-            Foreground = new SolidColorBrush(Color.FromArgb(255, 156, 163, 175))
-        });
-        officialStack.Children.Add(new TextBlock
-        {
-            Text = official.Url,
-            FontSize = 12,
-            TextTrimming = TextTrimming.CharacterEllipsis,
-            Foreground = new SolidColorBrush(Color.FromArgb(255, 107, 114, 128))
-        });
-        officialCard.Child = officialStack;
-        rootPanel.Children.Add(officialCard);
-
         // Third-party sources header + inline editor + list
-        var thirdHeader = new Grid();
+        var thirdHeader = new Grid { ColumnSpacing = 12 };
         thirdHeader.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         thirdHeader.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         thirdHeader.Children.Add(new TextBlock
@@ -1449,7 +1717,7 @@ public sealed partial class MainWindow : Window, IHostUiBridge
             Foreground = new SolidColorBrush(Color.FromArgb(255, 209, 213, 219))
         });
 
-        var addSourceBtn = new Button { Content = "+ 添加来源" };
+        var addSourceBtn = new Button { Content = "+ 添加来源", VerticalAlignment = VerticalAlignment.Center };
         Grid.SetColumn(addSourceBtn, 1);
         thirdHeader.Children.Add(addSourceBtn);
         rootPanel.Children.Add(thirdHeader);
@@ -1457,7 +1725,7 @@ public sealed partial class MainWindow : Window, IHostUiBridge
         string? editingSourceId = null;
         var editorNameBox = new TextBox { PlaceholderText = "如：Community Store" };
         var editorUrlBox = new TextBox { PlaceholderText = "https://vendor.github.io/store/registry.json" };
-        var editorStatusText = new TextBlock { FontSize = 12, Foreground = new SolidColorBrush(Color.FromArgb(255, 248, 113, 113)), Visibility = Visibility.Collapsed };
+        var editorStatusText = new TextBlock { FontSize = 12, TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.FromArgb(255, 248, 113, 113)), Visibility = Visibility.Collapsed };
         var editorSaveBtn = new Button
         {
             Content = "保存并校验",
@@ -1502,6 +1770,7 @@ public sealed partial class MainWindow : Window, IHostUiBridge
                 {
                     Text = "暂无第三方订阅来源，点击右上角「+ 添加来源」新增。",
                     FontSize = 12.5,
+                    TextWrapping = TextWrapping.Wrap,
                     Foreground = new SolidColorBrush(Color.FromArgb(255, 107, 114, 128)),
                     Margin = new Thickness(2, 4, 2, 4)
                 });
@@ -1519,7 +1788,7 @@ public sealed partial class MainWindow : Window, IHostUiBridge
                     Padding = new Thickness(14, 12, 14, 12)
                 };
                 var cs = new StackPanel { Spacing = 4 };
-                var top = new Grid();
+                var top = new Grid { ColumnSpacing = 12 };
                 top.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
                 top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
@@ -1528,6 +1797,7 @@ public sealed partial class MainWindow : Window, IHostUiBridge
                 {
                     Text = src.Name,
                     FontWeight = FontWeights.SemiBold,
+                    TextTrimming = TextTrimming.CharacterEllipsis,
                     Foreground = new SolidColorBrush(Color.FromArgb(255, 243, 244, 246))
                 });
                 titleStack.Children.Add(new TextBlock
@@ -1542,7 +1812,8 @@ public sealed partial class MainWindow : Window, IHostUiBridge
                     IsOn = src.Enabled,
                     OnContent = "● 启用",
                     OffContent = "停用",
-                    MinWidth = 0
+                    MinWidth = 0,
+                    VerticalAlignment = VerticalAlignment.Center
                 };
                 enableSwitch.Toggled += (_, _) =>
                 {
@@ -1693,6 +1964,7 @@ public sealed partial class MainWindow : Window, IHostUiBridge
         var mirrorBox = new TextBox
         {
             Text = _config.GithubMirrorPrefix,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
             PlaceholderText = "可选，如 https://ghfast.top/（留空直连，仅作用于 GitHub 直链）"
         };
         var mirrorExpander = new Expander
@@ -1705,11 +1977,25 @@ public sealed partial class MainWindow : Window, IHostUiBridge
         };
         rootPanel.Children.Add(mirrorExpander);
 
+        var contentHost = new Grid();
+        contentHost.Children.Add(new Border { Width = 480, Height = 0 });
+        contentHost.Children.Add(rootPanel);
+
+        var scrollViewer = new ScrollViewer
+        {
+            Content = contentHost,
+            MaxHeight = 520,
+            HorizontalScrollMode = ScrollMode.Disabled,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+        };
+
         dialog = new ContentDialog
         {
-            Content = new ScrollViewer { Content = rootPanel, MaxHeight = 560 },
+            Content = scrollViewer,
             PrimaryButtonText = "完成",
             DefaultButton = ContentDialogButton.Primary,
+            RequestedTheme = ElementTheme.Dark,
             XamlRoot = RootGrid.XamlRoot
         };
 
@@ -1981,6 +2267,7 @@ public sealed partial class MainWindow : Window, IHostUiBridge
             Title = title,
             Content = content,
             CloseButtonText = "确定",
+            RequestedTheme = ElementTheme.Dark,
             XamlRoot = RootGrid.XamlRoot
         };
         await dialog.ShowAsync();

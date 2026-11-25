@@ -44,7 +44,7 @@ public class JsonRpcPipeTests
             PluginId = "demo",
             Token = "secret-tok"
         });
-        Assert.Equal("1.0.0", hello?.HostVersion);
+        Assert.Equal(EasyTierExt.HostCore.Update.ClientUpdateService.GetCurrentVersion(), hello?.HostVersion);
 
         var nets = await conn.SendRequestAsync<List<HostNetworkStatus>>(IpcMethods.HostGetNetworks);
         Assert.Single(nets!);

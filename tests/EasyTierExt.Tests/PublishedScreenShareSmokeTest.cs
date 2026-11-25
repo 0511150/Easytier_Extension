@@ -103,6 +103,13 @@ public class PublishedScreenShareSmokeTest
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr GetModuleHandleW(string? lpModuleName);
 
-    private static string ResolveDistRoot([CallerFilePath] string callerPath = "") =>
-        Path.GetFullPath(Path.Combine(Path.GetDirectoryName(callerPath)!, "..", "..", "dist"));
+    private static string ResolveDistRoot([CallerFilePath] string callerPath = "")
+    {
+        var envRoot = Environment.GetEnvironmentVariable("EASYTIER_SMOKE_PLUGIN_ROOT");
+        if (!string.IsNullOrWhiteSpace(envRoot) && Directory.Exists(envRoot))
+        {
+            return envRoot;
+        }
+        return Path.GetFullPath(Path.Combine(Path.GetDirectoryName(callerPath)!, "..", "..", "dist"));
+    }
 }

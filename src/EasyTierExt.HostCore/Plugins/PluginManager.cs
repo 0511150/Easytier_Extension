@@ -345,7 +345,7 @@ public sealed class PluginManager : IAsyncDisposable
                 authenticatedPluginId = hello.PluginId;
                 var rt = _running.GetOrAdd(hello.PluginId, id => new ActivePluginRuntime(id, null));
                 rt.Connection = conn;
-                return new PluginHelloResult { HostVersion = "1.0.0" };
+                return new PluginHelloResult { HostVersion = Update.ClientUpdateService.GetCurrentVersion() };
             }
 
             if (authenticatedPluginId is null)
