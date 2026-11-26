@@ -441,7 +441,7 @@ internal static class Program
             else
             {
                 var parts = new List<string> { _chartPeer };
-                if (_ping is { } ping) parts.Add($"延迟 {ping.AvgMs:0.0} ms · 抖动 {ping.JitterMs:0.0} ms");
+                if (_ping is { } ping) parts.Add($"延迟 {FormatNumber(ping.AvgMs)} ms · 抖动 {FormatNumber(ping.JitterMs)} ms");
                 double upPeak = UpSamples.Count > 0 ? UpSamples.Max(s => s.Bps) : 0;
                 double downPeak = DownSamples.Count > 0 ? DownSamples.Max(s => s.Bps) : 0;
                 if (upPeak > 0 || downPeak > 0) parts.Add($"峰值 ↑ {FormatBps(upPeak)} ↓ {FormatBps(downPeak)}");
@@ -471,11 +471,12 @@ internal static class Program
                 },
                 stats = new object[]
                 {
-                    new { label = "已发送", value = _upResult is null ? "-" : FormatBytes(_upResult.TotalBytes) },
-                    new { label = "已接收", value = _downResult is null ? "-" : FormatBytes(_downResult.TotalBytes) },
+                    new { label = "已发送", weight = 1, value = _upResult is null ? "-" : FormatBytes(_upResult.TotalBytes) },
+                    new { label = "已接收", weight = 1, value = _downResult is null ? "-" : FormatBytes(_downResult.TotalBytes) },
                     new
                     {
                         label = "后 5 秒均值",
+                        weight = 2,
                         value = $"↑ {(_upResult is null ? "-" : FormatBps(_upResult.AverageBps))}  ↓ {(_downResult is null ? "-" : FormatBps(_downResult.AverageBps))}"
                     }
                 }
@@ -494,7 +495,7 @@ internal static class Program
                 ["time"] = h.Time.ToString("MM-dd HH:mm:ss"),
                 ["peer"] = $"{h.Hostname} ({h.Ipv4})",
                 ["route_type"] = string.IsNullOrEmpty(h.RouteType) ? "-" : h.RouteType.ToUpperInvariant(),
-                ["ping"] = h.PingMs is { } ping ? $"{ping:0.0} / {h.JitterMs ?? 0:0.0} ms" : "-",
+                ["ping"] = h.PingMs is { } ping ? $"{FormatNumber(ping)} / {FormatNumber(h.JitterMs ?? 0)} ms" : "-",
                 ["up"] = h.UpMbps is { } u ? FormatRate(u) : "-",
                 ["down"] = h.DownMbps is { } d ? FormatRate(d) : "-",
                 ["note"] = h.Error ?? $"{h.Streams} 线程"
@@ -648,23 +649,14 @@ internal static class Program
             ? $"{ms:0.#} ms"
             : string.IsNullOrWhiteSpace(raw) ? "-" : raw;
 
-    internal static string FormatRate(double mbps) => mbps switch
-    {
-        >= 1000 => $"{mbps / 1000:0.00} Gbps",
-        >= 100 => $"{mbps:0} Mbps",
-        >= 10 => $"{mbps:0.0} Mbps",
-        _ => $"{mbps:0.00} Mbps"
-    };
+    internal static string FormatNumber(double value) => UiNumberFormat.Number(value);
+
+    internal static string FormatRate(double mbps) =>
+        Math.Round(mbps) >= 1000 ? $"{FormatNumber(mbps / 1000)} Gbps" : $"{FormatNumber(mbps)} Mbps";
 
     private static string FormatBps(double bps) => FormatRate(bps / 1e6);
 
-    private static string FormatBytes(long bytes) => bytes switch
-    {
-        >= 1L << 30 => $"{bytes / (double)(1L << 30):0.00} GB",
-        >= 1L << 20 => $"{bytes / (double)(1L << 20):0.00} MB",
-        >= 1L << 10 => $"{bytes / 1024.0:0.00} KB",
-        _ => $"{bytes} B"
-    };
+    private static string FormatBytes(long bytes) => UiNumberFormat.Scaled(bytes, 1024, ["B", "KB", "MB", "GB", "TB"]);
 
     private static async Task SafeAsync(Func<Task> action)
     {
@@ -745,7 +737,7 @@ internal sealed class HistoryEntry
         var parts = new List<string>();
         if (UpMbps is { } u) parts.Add($"↑ {Program.FormatRate(u)}");
         if (DownMbps is { } d) parts.Add($"↓ {Program.FormatRate(d)}");
-        if (parts.Count == 0 && PingMs is { } p) parts.Add($"{p:0.0} ms");
+        if (parts.Count == 0 && PingMs is { } p) parts.Add($"{Program.FormatNumber(p)} ms");
         if (Error is not null) parts.Add(Error);
         return string.Join(" · ", parts);
     }

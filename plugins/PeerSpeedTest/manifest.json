@@ -1,7 +1,7 @@
 {
   "id": "peer-speedtest",
   "name": "对端测速",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "author": "EasyTier Extension",
   "description": "经对方同意后测试 EasyTier 虚拟局域网内到其他节点的延迟、抖动与上下行带宽（各 15 秒，取最后 5 秒均值），实时速率曲线与测速记录",
   "icon": "⚡",

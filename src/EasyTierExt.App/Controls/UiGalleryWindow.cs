@@ -218,14 +218,14 @@ public sealed class UiGalleryWindow : Window
             x_max = 15, x_unit = "s", y_format = "bps",
             series = new object[]
             {
-                new { name = "上传", icon = "↑", color = "#3B82F6", mark = 95e6, legend = "95.0 Mbps", points = Series(95e6) },
-                new { name = "下载", icon = "↓", color = "#9CA3AF", mark = 88e6, legend = "88.1 Mbps", points = Series(88e6) }
+                new { name = "上传", icon = "↑", color = "#3B82F6", mark = 39.2e6, legend = "39 Mbps", points = Series(39.2e6) },
+                new { name = "下载", icon = "↓", color = "#9CA3AF", mark = 61.1e6, legend = "61 Mbps", points = Series(61.1e6) }
             },
             stats = new object[]
             {
-                new { label = "已发送", value = "170.25 MB" },
-                new { label = "已接收", value = "157.80 MB" },
-                new { label = "后 5 秒均值", value = "↑ 95.0 Mbps  ↓ 88.1 Mbps" }
+                new { label = "已发送", weight = 1, value = "77 MB" },
+                new { label = "已接收", weight = 1, value = "49 MB" },
+                new { label = "后 5 秒均值", weight = 2, value = "↑ 39 Mbps  ↓ 61 Mbps" }
             }
         });
     }

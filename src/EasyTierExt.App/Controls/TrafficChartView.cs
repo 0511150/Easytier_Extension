@@ -34,7 +34,7 @@ internal sealed class TrafficChartView
     private readonly Canvas _axis;
     private readonly Border _tooltip;
     private readonly StackPanel _tooltipStack;
-    private readonly UniformWrapPanel _stats;
+    private readonly Grid _stats;
     private readonly Border _statsDivider;
     private readonly string _fallbackSubtitle;
 
@@ -104,7 +104,7 @@ internal sealed class TrafficChartView
         _statsDivider = new Border { Height = 1, Background = Brush(DividerColor), Margin = new Thickness(0, 4, 0, 0) };
         Grid.SetRow(_statsDivider, 3);
         root.Children.Add(_statsDivider);
-        _stats = new UniformWrapPanel { MinItemWidth = 150, ColumnSpacing = 0, RowSpacing = 6 };
+        _stats = new Grid();
         Grid.SetRow(_stats, 4);
         root.Children.Add(_stats);
 
@@ -143,19 +143,31 @@ internal sealed class TrafficChartView
     private void RebuildStats()
     {
         _stats.Children.Clear();
+        _stats.ColumnDefinitions.Clear();
         bool any = _data.Stats.Count > 0;
         _stats.Visibility = _statsDivider.Visibility = any ? Visibility.Visible : Visibility.Collapsed;
+
+        // 单行按 weight 分栏（默认等分）；数值不换行，栏宽不够时整体等比缩小
         for (int i = 0; i < _data.Stats.Count; i++)
         {
-            var cell = new StackPanel { Spacing = 6, Padding = new Thickness(14, 6, 12, 2) };
-            cell.Children.Add(new TextBlock { Text = _data.Stats[i].Label, FontSize = 12.5, Foreground = Brush(TextSecondary) });
-            cell.Children.Add(new TextBlock { Text = _data.Stats[i].Value, FontSize = 20, FontWeight = FontWeights.SemiBold, Foreground = Brush(TextPrimary), TextWrapping = TextWrapping.Wrap });
+            var (label, value, weight) = _data.Stats[i];
+            _stats.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(weight, GridUnitType.Star) });
+            var cell = new StackPanel { Spacing = 6, Padding = new Thickness(i == 0 ? 0 : 16, 6, 12, 2) };
+            cell.Children.Add(new TextBlock { Text = label, FontSize = 12.5, Foreground = Brush(TextSecondary), TextTrimming = TextTrimming.CharacterEllipsis });
+            cell.Children.Add(new Viewbox
+            {
+                StretchDirection = StretchDirection.DownOnly,
+                Stretch = Stretch.Uniform,
+                HorizontalAlignment = HorizontalAlignment.Left,
+                Child = new TextBlock { Text = value, FontSize = 20, FontWeight = FontWeights.SemiBold, Foreground = Brush(TextPrimary), TextWrapping = TextWrapping.NoWrap }
+            });
             var border = new Border
             {
                 Child = cell,
                 BorderBrush = Brush(DividerColor),
-                BorderThickness = new Thickness(1, 0, 0, 0)
+                BorderThickness = new Thickness(i == 0 ? 0 : 1, 0, 0, 0)
             };
+            Grid.SetColumn(border, i);
             _stats.Children.Add(border);
         }
     }
@@ -367,7 +379,7 @@ internal sealed class TrafficChartView
         public string YFormat { get; private init; } = "number";
         public string YUnit { get; private init; } = string.Empty;
         public List<ChartSeries> Series { get; private init; } = [];
-        public List<(string Label, string Value)> Stats { get; private init; } = [];
+        public List<(string Label, string Value, double Weight)> Stats { get; private init; } = [];
 
         public static ChartData Parse(JsonElement v)
         {
@@ -403,11 +415,11 @@ internal sealed class TrafficChartView
                 }
             }
 
-            var stats = new List<(string, string)>();
+            var stats = new List<(string, string, double)>();
             if (v.TryGetProperty("stats", out var st) && st.ValueKind == JsonValueKind.Array)
             {
                 foreach (var s in st.EnumerateArray())
-                    stats.Add((Str(s, "label") ?? string.Empty, Str(s, "value") ?? "-"));
+                    stats.Add((Str(s, "label") ?? string.Empty, Str(s, "value") ?? "-", Num(s, "weight") is double wt && wt > 0 ? wt : 1));
             }
 
             return new ChartData
@@ -424,21 +436,10 @@ internal sealed class TrafficChartView
 
         public string FormatY(double y) => YFormat switch
         {
-            "bps" => FormatScaled(y, 1000, ["bps", "Kbps", "Mbps", "Gbps"]),
-            "Bps" => FormatScaled(y, 1024, ["B/s", "KB/s", "MB/s", "GB/s"]),
-            _ => $"{y.ToString("0.##", CultureInfo.InvariantCulture)} {YUnit}".TrimEnd()
+            "bps" => UiNumberFormat.Scaled(y, 1000, ["bps", "Kbps", "Mbps", "Gbps"]),
+            "Bps" => UiNumberFormat.Scaled(y, 1024, ["B/s", "KB/s", "MB/s", "GB/s"]),
+            _ => $"{UiNumberFormat.Number(y)} {YUnit}".TrimEnd()
         };
-
-        private static string FormatScaled(double value, double k, string[] units)
-        {
-            int i = 0;
-            while (value >= k && i < units.Length - 1)
-            {
-                value /= k;
-                i++;
-            }
-            return $"{value.ToString(i == 0 ? "0" : "0.00", CultureInfo.InvariantCulture)} {units[i]}";
-        }
 
         private static string? Str(JsonElement e, string name) =>
             e.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.String ? p.GetString() : null;
