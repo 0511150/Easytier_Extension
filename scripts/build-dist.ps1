@@ -84,7 +84,8 @@ try {
     Write-Host "[5/6] Publishing official plugins to temp smoke directory (excluded from dist)..."
     $SmokePlugins = @(
         @{ Id = "screen-share"; Dir = "ScreenShare" },
-        @{ Id = "peer-speedtest"; Dir = "PeerSpeedTest" }
+        @{ Id = "peer-speedtest"; Dir = "PeerSpeedTest" },
+        @{ Id = "clipboard-share"; Dir = "ClipboardShare" }
     )
     foreach ($Plugin in $SmokePlugins) {
         $SmokePluginDir = Join-Path $TempSmokeRoot ("plugins\" + $Plugin.Id)

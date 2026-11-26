@@ -301,6 +301,7 @@ public sealed class DeclarativePluginRenderer
         "key_value" => CreateKeyValue(item, initial),
         "stats" => CreateStats(item, initial),
         "checkbox" => CreateCheckBox(pluginId, menuId, item, initial),
+        "card_list" => CreateCardList(pluginId, menuId, item, initial),
         "button" when item.Primary => CreateButton(pluginId, menuId, item, initial),
         _ => CreateOptionRow(pluginId, menuId, item, initial)
     };
@@ -1291,7 +1292,7 @@ public sealed class DeclarativePluginRenderer
         return root;
     }
 
-    private static async Task LoadThumbnailAsync(Image image, TextBlock fallbackLabel, string base64)
+    private static async Task LoadThumbnailAsync(Image image, TextBlock? fallbackLabel, string base64)
     {
         try
         {
@@ -1300,11 +1301,272 @@ public sealed class DeclarativePluginRenderer
             var bmp = new BitmapImage { DecodePixelWidth = 288 };
             await bmp.SetSourceAsync(ms.AsRandomAccessStream());
             image.Source = bmp;
-            fallbackLabel.Visibility = Visibility.Collapsed;
+            if (fallbackLabel is not null) fallbackLabel.Visibility = Visibility.Collapsed;
         }
         catch
         {
         }
+    }
+
+    // ---------------- 卡片列表 ----------------
+
+    private const int CardListPageSize = 50;
+
+    /// <summary>
+    /// 卡片列表（主程序 ≥ 1.4.0）：每张卡片左侧有一条 accent 色边，包含标题、标签、说明、正文预览、缩略图与操作按钮。
+    /// 刷新时按卡片 id 复用未变化的卡片；一次显示 50 张，其余点击“显示更多”展开，数量再多也不卡顿。
+    /// value 为卡片数组，或 { cards: [...], legend: [{ label, color }] }。
+    /// </summary>
+    private UIElement CreateCardList(string pluginId, string menuId, UiItem item, JsonElement? initial)
+    {
+        var actions = item.RowActions ?? [];
+        var root = new StackPanel { Spacing = 10 };
+        var legendPanel = new FlowPanel { ColumnSpacing = 16, RowSpacing = 6, Visibility = Visibility.Collapsed };
+        var placeholder = WrapText(string.IsNullOrWhiteSpace(item.Placeholder) ? "暂无内容" : item.Placeholder!, 13, TextMuted);
+        placeholder.Margin = new Thickness(4, 4, 4, 4);
+        var listPanel = new StackPanel { Spacing = 8 };
+        var moreText = new TextBlock { FontSize = 13 };
+        var moreButton = new Button
+        {
+            Content = moreText,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            Visibility = Visibility.Collapsed
+        };
+        root.Children.Add(legendPanel);
+        root.Children.Add(placeholder);
+        root.Children.Add(listPanel);
+        root.Children.Add(moreButton);
+
+        var cache = new Dictionary<string, (string Signature, FrameworkElement Element)>(StringComparer.Ordinal);
+        List<JsonElement> cards = [];
+        int visibleCount = CardListPageSize;
+        string legendSignature = string.Empty;
+
+        FrameworkElement BuildCard(JsonElement card, string id)
+        {
+            Color accent = ParseColor(GetJsonString(card, "accent")) ?? TextMuted;
+            var content = new StackPanel { Spacing = 4 };
+
+            var header = new FlowPanel { ColumnSpacing = 8, RowSpacing = 4 };
+            if (GetJsonString(card, "title") is { Length: > 0 } title)
+            {
+                header.Children.Add(new TextBlock
+                {
+                    Text = title,
+                    FontSize = 13.5,
+                    FontWeight = FontWeights.SemiBold,
+                    Foreground = Brush(TextTitle),
+                    TextTrimming = TextTrimming.CharacterEllipsis
+                });
+            }
+            if (GetJsonString(card, "tag") is { Length: > 0 } tag)
+            {
+                header.Children.Add(new Border
+                {
+                    CornerRadius = new CornerRadius(9),
+                    Padding = new Thickness(8, 1, 8, 2),
+                    Background = Brush(Color.FromArgb(40, accent.R, accent.G, accent.B)),
+                    BorderBrush = Brush(Color.FromArgb(110, accent.R, accent.G, accent.B)),
+                    BorderThickness = new Thickness(1),
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Child = new TextBlock { Text = tag, FontSize = 11.5, Foreground = Brush(accent) }
+                });
+            }
+            if (header.Children.Count > 0) content.Children.Add(header);
+
+            if (GetJsonString(card, "subtitle") is { Length: > 0 } subtitle)
+            {
+                content.Children.Add(WrapText(subtitle, 11.5, TextSecondary));
+            }
+            if (GetJsonString(card, "text") is { Length: > 0 } text)
+            {
+                content.Children.Add(new TextBlock
+                {
+                    Text = text,
+                    FontSize = 13,
+                    Foreground = Brush(TextBody),
+                    TextWrapping = TextWrapping.Wrap,
+                    TextTrimming = TextTrimming.CharacterEllipsis,
+                    MaxLines = item.Max is >= 1 ? (int)item.Max.Value : 4,
+                    IsTextSelectionEnabled = true,
+                    Margin = new Thickness(0, 2, 0, 0)
+                });
+            }
+            if (GetJsonString(card, "image_base64") is { Length: > 0 } imageBase64)
+            {
+                var img = new Image { Stretch = Stretch.Uniform, MaxHeight = 120, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 4, 0, 0) };
+                _ = LoadThumbnailAsync(img, null, imageBase64);
+                content.Children.Add(img);
+            }
+
+            var buttons = new FlowPanel { ColumnSpacing = 6, RowSpacing = 6, AlignRight = true };
+            foreach (var act in actions)
+            {
+                if (!RowActionVisible(act, key => card.TryGetProperty(key, out var v) ? v : null)) continue;
+                var btn = new Button
+                {
+                    Content = new TextBlock { Text = act.Label, TextTrimming = TextTrimming.CharacterEllipsis },
+                    Padding = new Thickness(10, 4, 10, 4),
+                    FontSize = 12,
+                    MinWidth = 0
+                };
+                btn.Click += async (_, _) => await _onUiAction(pluginId, menuId, new EventUiActionParams
+                {
+                    MenuId = menuId,
+                    Key = item.Key,
+                    Action = act.Id,
+                    RowId = id
+                });
+                buttons.Children.Add(btn);
+            }
+
+            var body = new LabeledRow(content, buttons)
+            {
+                LabelMinWidth = 200,
+                MinRowHeight = 0,
+                Spacing = 12,
+                StackSpacing = 8,
+                Margin = new Thickness(12, 10, 12, 10)
+            };
+
+            var grid = new Grid();
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(4) });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            grid.Children.Add(new Border { Background = Brush(accent), CornerRadius = new CornerRadius(7, 0, 0, 7) });
+            Grid.SetColumn(body, 1);
+            grid.Children.Add(body);
+
+            return new Border
+            {
+                Background = Brush(PaneBackground),
+                BorderBrush = Brush(PaneBorder),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(8),
+                Child = grid
+            };
+        }
+
+        void RenderCards()
+        {
+            var wanted = new List<FrameworkElement>();
+            var kept = new HashSet<string>(StringComparer.Ordinal);
+            for (int i = 0; i < cards.Count && wanted.Count < visibleCount; i++)
+            {
+                string id = GetJsonString(cards[i], "id") ?? $"#{i}";
+                if (!kept.Add(id)) continue; // 重复 id 只显示第一张
+                string signature = cards[i].GetRawText();
+                if (!cache.TryGetValue(id, out var entry) || entry.Signature != signature)
+                {
+                    entry = (signature, BuildCard(cards[i], id));
+                    cache[id] = entry;
+                }
+                wanted.Add(entry.Element);
+            }
+            foreach (var stale in cache.Keys.Where(k => !kept.Contains(k)).ToList()) cache.Remove(stale);
+
+            bool unchanged = listPanel.Children.Count == wanted.Count &&
+                             wanted.Select((e, i) => ReferenceEquals(listPanel.Children[i], e)).All(same => same);
+            if (!unchanged)
+            {
+                listPanel.Children.Clear();
+                foreach (var el in wanted) listPanel.Children.Add(el);
+            }
+
+            int rest = cards.Count - wanted.Count;
+            placeholder.Visibility = cards.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            moreButton.Visibility = rest > 0 ? Visibility.Visible : Visibility.Collapsed;
+            moreText.Text = $"显示更多（还有 {rest} 条）";
+        }
+
+        void RenderLegend(JsonElement? legend)
+        {
+            string signature = legend?.GetRawText() ?? string.Empty;
+            if (signature == legendSignature) return;
+            legendSignature = signature;
+            legendPanel.Children.Clear();
+            if (legend is { ValueKind: JsonValueKind.Array } arr)
+            {
+                foreach (var e in arr.EnumerateArray())
+                {
+                    if (e.ValueKind != JsonValueKind.Object) continue;
+                    var entry = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+                    entry.Children.Add(new Border
+                    {
+                        Width = 4,
+                        Height = 14,
+                        CornerRadius = new CornerRadius(2),
+                        VerticalAlignment = VerticalAlignment.Center,
+                        Background = Brush(ParseColor(GetJsonString(e, "color")) ?? TextMuted)
+                    });
+                    entry.Children.Add(new TextBlock
+                    {
+                        Text = GetJsonString(e, "label") ?? string.Empty,
+                        FontSize = 12,
+                        Foreground = Brush(TextSecondary),
+                        VerticalAlignment = VerticalAlignment.Center
+                    });
+                    legendPanel.Children.Add(entry);
+                }
+            }
+            legendPanel.Visibility = legendPanel.Children.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        void Apply(JsonElement? v)
+        {
+            JsonElement? list = null;
+            if (v is { ValueKind: JsonValueKind.Array } arr)
+            {
+                list = arr;
+            }
+            else if (v is { ValueKind: JsonValueKind.Object } obj)
+            {
+                if (obj.TryGetProperty("cards", out var c)) list = c;
+                if (obj.TryGetProperty("legend", out var l)) RenderLegend(l);
+            }
+            if (list is { ValueKind: JsonValueKind.Array } cardsArr)
+            {
+                cards = cardsArr.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.Object).Select(e => e.Clone()).ToList();
+            }
+            RenderCards();
+        }
+
+        moreButton.Click += (_, _) =>
+        {
+            visibleCount += CardListPageSize;
+            RenderCards();
+        };
+
+        Apply(initial);
+        _updaters[item.Key] = v => Apply(v);
+        return WithOptionalHeader(item, root);
+    }
+
+    /// <summary>行操作的 when_key / when_equals 条件：未设置时总是显示。</summary>
+    private static bool RowActionVisible(UiRowAction act, Func<string, JsonElement?> getValue)
+    {
+        if (string.IsNullOrWhiteSpace(act.WhenKey) || act.WhenEquals is null) return true;
+        return getValue(act.WhenKey) is { } actual &&
+               string.Equals(actual.ToString(), act.WhenEquals.Value.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string? GetJsonString(JsonElement obj, string key) =>
+        obj.ValueKind == JsonValueKind.Object && obj.TryGetProperty(key, out var v) && v.ValueKind != JsonValueKind.Null
+            ? FormatJsonValue(v)
+            : null;
+
+    /// <summary>解析 #RRGGBB 或 #AARRGGBB。</summary>
+    private static Color? ParseColor(string? hex)
+    {
+        if (string.IsNullOrWhiteSpace(hex)) return null;
+        var s = hex.Trim().TrimStart('#');
+        if (!uint.TryParse(s, System.Globalization.NumberStyles.HexNumber, null, out uint v)) return null;
+        return s.Length switch
+        {
+            6 => Color.FromArgb(255, (byte)(v >> 16), (byte)(v >> 8), (byte)v),
+            8 => Color.FromArgb((byte)(v >> 24), (byte)(v >> 16), (byte)(v >> 8), (byte)v),
+            _ => null
+        };
     }
 
     // ---------------- 表格 ----------------
@@ -1410,12 +1672,7 @@ public sealed class DeclarativePluginRenderer
 
                     foreach (var act in actions)
                     {
-                        if (!string.IsNullOrWhiteSpace(act.WhenKey) && act.WhenEquals is not null &&
-                            (!row.TryGetValue(act.WhenKey, out var actual) ||
-                             !string.Equals(actual.ToString(), act.WhenEquals.Value.ToString(), StringComparison.OrdinalIgnoreCase)))
-                        {
-                            continue;
-                        }
+                        if (!RowActionVisible(act, key => row.TryGetValue(key, out var v) ? v : null)) continue;
 
                         var btn = new Button
                         {

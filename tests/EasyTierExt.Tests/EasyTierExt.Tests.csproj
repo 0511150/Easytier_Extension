@@ -17,5 +17,6 @@
     <ProjectReference Include="..\..\src\EasyTierExt.HostCore\EasyTierExt.HostCore.csproj" />
     <ProjectReference Include="..\..\plugins\ScreenShare\ScreenShare.csproj" />
     <ProjectReference Include="..\..\plugins\PeerSpeedTest\PeerSpeedTest.csproj" />
+    <ProjectReference Include="..\..\plugins\ClipboardShare\ClipboardShare.csproj" />
   </ItemGroup>
 </Project>

@@ -195,6 +195,37 @@ public sealed class UiGalleryWindow : Window
                         new UiItem { Key = "empty_tbl", Type = "table", Label = "空表格", Placeholder = "暂无测速记录", Columns = [new() { Key = "a", Label = "时间" }, new() { Key = "b", Label = "节点" }] },
                         new UiItem { Key = "cht", Type = "chart", Label = "速率曲线 chart", Value = SampleChart() }
                     ]
+                },
+                new UiSection
+                {
+                    Id = "cards",
+                    Title = "卡片列表",
+                    Items =
+                    [
+                        new UiItem
+                        {
+                            Key = "crd", Type = "card_list", Label = "卡片列表 card_list", Subtitle = "左侧色条由 accent 指定；按 id 复用卡片，超过 50 张时显示“显示更多”",
+                            Placeholder = "暂无记录",
+                            RowActions = [new() { Id = "copy", Label = "复制" }, new() { Id = "delete", Label = "删除", WhenKey = "deletable", WhenEquals = J(true) }],
+                            Value = J(new
+                            {
+                                legend = new[]
+                                {
+                                    new { label = "1 分钟内", color = "#10B981" },
+                                    new { label = "10 分钟内", color = "#3B82F6" },
+                                    new { label = "1 小时内", color = "#8B5CF6" },
+                                    new { label = "更早", color = "#6B7280" }
+                                },
+                                cards = new object[]
+                                {
+                                    new { id = "c1", accent = "#10B981", title = "文本 · 42 字", subtitle = "本机 · 14:03:22", text = "这是一段剪贴板文本，卡片正文最多显示 4 行，超出部分省略。\n第二行\n第三行\n第四行\n第五行不会显示", deletable = true },
+                                    new { id = "c2", accent = "#3B82F6", title = "图片 · 96×54", tag = "重连合并", subtitle = "来自 DESKTOP-WORKSTATION-01 · 13:58:10", image_base64 = Convert.ToBase64String(SamplePng()), deletable = true },
+                                    new { id = "c3", accent = "#6B7280", title = "文本 · 12 字", subtitle = "来自 laptop · 12:30:45", text = "https://github.com/0511150/Easytier_Extension", deletable = false }
+                                }
+                            })
+                        },
+                        new UiItem { Key = "crd_empty", Type = "card_list", Placeholder = "暂无剪贴板记录，复制任意文字或图片后会显示在这里" }
+                    ]
                 }
             ]
         };
