@@ -7,8 +7,13 @@ namespace EasyTierExt.App;
 
 public partial class App : Application
 {
+    /// <summary>--ui-gallery：只打开声明式控件预览窗口，供插件开发者查看效果。</summary>
+    public const string UiGalleryArg = "--ui-gallery";
+
     private static bool _isAutoStartLaunch;
+    private static bool _isUiGallery;
     private MainWindow? _mainWindow;
+    private Window? _galleryWindow;
 
     public App()
     {
@@ -18,6 +23,13 @@ public partial class App : Application
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
+        if (_isUiGallery)
+        {
+            _galleryWindow = new Controls.UiGalleryWindow();
+            _galleryWindow.Activate();
+            return;
+        }
+
         _mainWindow = new MainWindow(_isAutoStartLaunch);
         if (!_isAutoStartLaunch)
         {
@@ -29,6 +41,7 @@ public partial class App : Application
     public static void Main(string[] args)
     {
         _isAutoStartLaunch = args.Any(a => string.Equals(a, AutoStartService.AutoStartArg, StringComparison.OrdinalIgnoreCase));
+        _isUiGallery = args.Any(a => string.Equals(a, UiGalleryArg, StringComparison.OrdinalIgnoreCase));
         ComWrappersSupport.InitializeComWrappers();
         Application.Start(_ =>
         {

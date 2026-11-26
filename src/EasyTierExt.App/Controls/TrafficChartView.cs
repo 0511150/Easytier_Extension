@@ -28,13 +28,13 @@ internal sealed class TrafficChartView
 
     private readonly TextBlock _title;
     private readonly TextBlock _subtitle;
-    private readonly StackPanel _legend;
+    private readonly FlowPanel _legend;
     private readonly Canvas _plot;
     private readonly Canvas _overlay;
     private readonly Canvas _axis;
     private readonly Border _tooltip;
     private readonly StackPanel _tooltipStack;
-    private readonly Grid _stats;
+    private readonly UniformWrapPanel _stats;
     private readonly Border _statsDivider;
     private readonly string _fallbackSubtitle;
 
@@ -51,19 +51,14 @@ internal sealed class TrafficChartView
         for (int i = 0; i < 5; i++) root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
         // 标题与图例
-        var header = new Grid();
-        header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         var titles = new StackPanel { Spacing = 4 };
         _title = new TextBlock { Text = item.Label, FontSize = 13.5, FontWeight = FontWeights.SemiBold, Foreground = Brush(TextPrimary) };
         _subtitle = new TextBlock { FontSize = 12.5, Foreground = Brush(TextSecondary), TextWrapping = TextWrapping.Wrap };
         titles.Children.Add(_title);
         titles.Children.Add(_subtitle);
-        header.Children.Add(titles);
-        _legend = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 22, VerticalAlignment = VerticalAlignment.Top };
-        Grid.SetColumn(_legend, 1);
-        header.Children.Add(_legend);
-        root.Children.Add(header);
+        // 图例放不下时换到标题下方
+        _legend = new FlowPanel { ColumnSpacing = 22, RowSpacing = 4 };
+        root.Children.Add(new LabeledRow(titles, _legend) { LabelMinWidth = 160, MinRowHeight = 0, StackSpacing = 8 });
 
         // 绘图区
         var plotHost = new Grid { Height = PlotHeight, Background = new SolidColorBrush(Colors.Transparent) };
@@ -109,7 +104,7 @@ internal sealed class TrafficChartView
         _statsDivider = new Border { Height = 1, Background = Brush(DividerColor), Margin = new Thickness(0, 4, 0, 0) };
         Grid.SetRow(_statsDivider, 3);
         root.Children.Add(_statsDivider);
-        _stats = new Grid { ColumnSpacing = 0 };
+        _stats = new UniformWrapPanel { MinItemWidth = 150, ColumnSpacing = 0, RowSpacing = 6 };
         Grid.SetRow(_stats, 4);
         root.Children.Add(_stats);
 
@@ -148,22 +143,19 @@ internal sealed class TrafficChartView
     private void RebuildStats()
     {
         _stats.Children.Clear();
-        _stats.ColumnDefinitions.Clear();
         bool any = _data.Stats.Count > 0;
         _stats.Visibility = _statsDivider.Visibility = any ? Visibility.Visible : Visibility.Collapsed;
         for (int i = 0; i < _data.Stats.Count; i++)
         {
-            _stats.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            var cell = new StackPanel { Spacing = 6, Padding = new Thickness(i == 0 ? 0 : 20, 6, 12, 2) };
+            var cell = new StackPanel { Spacing = 6, Padding = new Thickness(14, 6, 12, 2) };
             cell.Children.Add(new TextBlock { Text = _data.Stats[i].Label, FontSize = 12.5, Foreground = Brush(TextSecondary) });
             cell.Children.Add(new TextBlock { Text = _data.Stats[i].Value, FontSize = 20, FontWeight = FontWeights.SemiBold, Foreground = Brush(TextPrimary), TextWrapping = TextWrapping.Wrap });
             var border = new Border
             {
                 Child = cell,
                 BorderBrush = Brush(DividerColor),
-                BorderThickness = new Thickness(i == 0 ? 0 : 1, 0, 0, 0)
+                BorderThickness = new Thickness(1, 0, 0, 0)
             };
-            Grid.SetColumn(border, i);
             _stats.Children.Add(border);
         }
     }

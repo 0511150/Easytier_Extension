@@ -87,3 +87,4 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\build-dist.ps1
 ## 扩展开发
 
 - 插件开发文档：[插件开发规范 (插件开发规范.md)](插件开发规范.md)
+- 控件预览：运行 `EasyTierClient.exe --ui-gallery` 打开声明式控件预览窗口，可拖动窗口宽度检查插件界面在不同宽度下的效果

@@ -33,7 +33,9 @@ public sealed class UiItem
     public string Key { get; set; } = string.Empty;
 
     /// <summary>
-    /// Supported: switch, select, segmented, source_picker, input, number, status, button, table, chart, viewport
+    /// Supported: switch, select, segmented, source_picker, input, number, status, button, table, chart, viewport,
+    /// text, alert, badge, divider, progress, slider, checkbox, radio, checklist, textarea, password, link, image,
+    /// key_value, stats, button_group
     /// </summary>
     [JsonPropertyName("type")]
     public string Type { get; set; } = "status";
@@ -76,6 +78,18 @@ public sealed class UiItem
 
     [JsonPropertyName("unit")]
     public string? Unit { get; set; }
+
+    /// <summary>slider 的步进值。</summary>
+    [JsonPropertyName("step")]
+    public double? Step { get; set; }
+
+    /// <summary>alert / badge 的样式：info、success、warning、error。</summary>
+    [JsonPropertyName("severity")]
+    public string? Severity { get; set; }
+
+    /// <summary>link 点击时用系统浏览器打开的地址（仅限 http/https）。</summary>
+    [JsonPropertyName("url")]
+    public string? Url { get; set; }
 
     [JsonPropertyName("danger")]
     public bool Danger { get; set; }

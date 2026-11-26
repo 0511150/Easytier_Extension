@@ -83,6 +83,12 @@ public sealed partial class MainWindow : Window, IHostUiBridge
         AppVersionSubText.Text = $"with Extension · v{ClientUpdateService.GetCurrentVersion()}";
         UpdateBannerPill.PointerPressed += (_, _) => NavigateTo("core:quick");
         AppWindow.Resize(new SizeInt32(1140, 740));
+        // 左侧菜单固定 236px：限制最小窗口宽度，保证插件内容区不窄于约 420px（插件开发规范 4.4）
+        if (AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter presenter)
+        {
+            presenter.PreferredMinimumWidth = 720;
+            presenter.PreferredMinimumHeight = 520;
+        }
         if (AppWindow.TitleBar is { } tb)
         {
             tb.ButtonBackgroundColor = Colors.Transparent;
