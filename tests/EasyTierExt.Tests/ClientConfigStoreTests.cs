@@ -47,7 +47,7 @@ public class ClientConfigStoreTests
     }
 
     [Fact]
-    public void DefaultNetworkProfile_UsesDhcpAnd_10_10_10_10_24_StaticIpv4()
+    public void DefaultNetworkProfile_UsesDhcpAnd_10_10_10_255_32_StaticIpv4()
     {
         var tempRoot = Path.Combine(Path.GetTempPath(), $"et_cfg_default_{Guid.NewGuid():N}");
         try
@@ -57,14 +57,48 @@ public class ClientConfigStoreTests
             var direct = new NetworkProfile();
 
             Assert.Equal("dhcp", direct.Ipv4Mode);
-            Assert.Equal("10.10.10.10/24", direct.StaticIpv4);
+            Assert.Equal("10.10.10.255/32", direct.StaticIpv4);
             Assert.Single(loaded.Networks);
             Assert.Equal("dhcp", loaded.Networks[0].Ipv4Mode);
-            Assert.Equal("10.10.10.10/24", loaded.Networks[0].StaticIpv4);
+            Assert.Equal("10.10.10.255/32", loaded.Networks[0].StaticIpv4);
         }
         finally
         {
             if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, true);
         }
+    }
+
+    [Fact]
+    public void Load_ReplacesOldDefaultStaticIpv4_OnlyWhenStaticWasNeverUsed()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"et_cfg_oldip_{Guid.NewGuid():N}");
+        try
+        {
+            var store = new ClientConfigStore(tempRoot);
+            var cfg = store.Load();
+            cfg.Networks[0].StaticIpv4 = "10.10.10.10/24";
+            var staticNet = new NetworkProfile { Ipv4Mode = "static", StaticIpv4 = "10.10.10.10/24" };
+            cfg.Networks.Add(staticNet);
+            store.Save(cfg);
+
+            var loaded = new ClientConfigStore(tempRoot).Load();
+            Assert.Equal("10.10.10.255/32", loaded.Networks[0].StaticIpv4);
+            Assert.Equal("10.10.10.10/24", loaded.Networks[1].StaticIpv4);
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, true);
+        }
+    }
+
+    [Theory]
+    [InlineData("10.10.10.255", "10.10.10.255/32", "10.10.10.255")]
+    [InlineData(" 10.10.10.255/32 ", "10.10.10.255/32", "10.10.10.255")]
+    [InlineData("10.10.10.8/24", "10.10.10.8/24", "10.10.10.8/24")]
+    [InlineData("", "", "")]
+    public void StaticIpv4_DefaultsTo32_AndHides32(string input, string normalized, string shown)
+    {
+        Assert.Equal(normalized, NetworkConfigToml.NormalizeIpv4(input));
+        Assert.Equal(shown, NetworkConfigToml.DisplayIpv4(input));
     }
 }

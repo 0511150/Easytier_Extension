@@ -901,7 +901,7 @@ internal static class Program
                 Key = "mon_scale",
                 Type = "select",
                 Label = "大小",
-                Options = [Option("跟随系统", MonitorSetting.ModeAuto), .. ScalePercents.Select(p => Option($"{p}%", p.ToString())), Option("按屏幕尺寸", MonitorSetting.ModeSize)]
+                Options = [Option("跟随系统", MonitorSetting.ModeAuto), Option("按屏幕尺寸", MonitorSetting.ModeSize), .. ScalePercents.Select(p => Option($"{p}%", p.ToString()))]
             }
         };
         if (sizeMode)

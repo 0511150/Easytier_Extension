@@ -137,7 +137,10 @@ public sealed class NetworkProfile
     public string Ipv4Mode { get; set; } = "dhcp";
 
     [JsonPropertyName("static_ipv4")]
-    public string StaticIpv4 { get; set; } = "10.10.10.10/24";
+    public string StaticIpv4 { get; set; } = NetworkConfigToml.DefaultStaticIpv4;
+
+    /// <summary>1.4.0 及以前的默认静态地址；从未用过静态地址的配置读取时换成新默认值。</summary>
+    internal const string LegacyDefaultStaticIpv4 = "10.10.10.10/24";
 
     [JsonPropertyName("hostname")]
     public string Hostname { get; set; } = Environment.MachineName;
@@ -198,7 +201,13 @@ public sealed class ClientConfigStore
             cfg.Networks.Add(new NetworkProfile());
         }
         cfg.EnsureSourcesNormalized();
-        if (EnsureNetworkConfigs(cfg))
+        bool changed = false;
+        foreach (var n in cfg.Networks.Where(n => n.Ipv4Mode == "dhcp" && n.StaticIpv4 == NetworkProfile.LegacyDefaultStaticIpv4))
+        {
+            n.StaticIpv4 = NetworkConfigToml.DefaultStaticIpv4;
+            changed = true;
+        }
+        if (EnsureNetworkConfigs(cfg) || changed)
         {
             Save(cfg);
         }

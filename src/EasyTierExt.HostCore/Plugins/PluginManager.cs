@@ -243,6 +243,20 @@ public sealed class PluginManager : IAsyncDisposable
         }
     }
 
+    public async Task SendPageOpenedAsync(string pluginId, string menuId)
+    {
+        if (_running.TryGetValue(pluginId, out var rt) && rt.Connection is not null)
+        {
+            try
+            {
+                await rt.Connection.SendNotificationAsync(IpcMethods.EventPageOpened, new EventPageOpenedParams { MenuId = menuId });
+            }
+            catch
+            {
+            }
+        }
+    }
+
     public async Task SendViewportChangedAsync(string pluginId, EventViewportChangedParams vp)
     {
         if (_running.TryGetValue(pluginId, out var rt) && rt.Connection is not null)

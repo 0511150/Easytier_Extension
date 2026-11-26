@@ -640,8 +640,7 @@ internal static class Program
         {
             var values = new Dictionary<string, object?>
             {
-                ["history"] = BuildHistoryValue(),
-                ["history_status"] = BuildHistoryStatus()
+                ["history"] = BuildHistoryValue()
             };
             string json = JsonSerializer.Serialize(values);
             if (json == _lastHistoryJson) return;
@@ -652,12 +651,6 @@ internal static class Program
         {
             HistoryRefreshGate.Release();
         }
-    }
-
-    private static string BuildHistoryStatus()
-    {
-        string ttl = _settings.TtlMinutes > 0 ? $"复制 {TtlText(_settings.TtlMinutes)}后自动清除" : "不自动清除";
-        return $"共 {_history.Count} 条 · {ttl} · 只保存在内存中，退出即清空";
     }
 
     private static object BuildHistoryValue()
@@ -672,11 +665,8 @@ internal static class Program
             var card = new Dictionary<string, object?>
             {
                 ["id"] = e.Id,
-                ["accent"] = BucketFor(now - e.TimeUtc).Color,
-                ["title"] = CardTitle(e),
-                ["subtitle"] = CardSubtitle(e)
+                ["accent"] = BucketFor(now - e.TimeUtc).Color
             };
-            if (e.Merged) card["tag"] = "重连合并";
             if (e.Kind == ClipKind.Text)
             {
                 card["text"] = Preview(e.Text);
@@ -722,19 +712,6 @@ internal static class Program
             }
             ScheduleHistoryRefresh();
         });
-    }
-
-    private static string CardTitle(ClipEntry e) => e.Kind == ClipKind.Text
-        ? $"文本 · {e.Text?.Length ?? 0} 字"
-        : e.Width > 0 ? $"图片 · {e.Width}×{e.Height} · {FormatBytes(e.SizeBytes)}" : $"图片 · {FormatBytes(e.SizeBytes)}";
-
-    private static string CardSubtitle(ClipEntry e)
-    {
-        var local = e.TimeUtc.ToLocalTime();
-        string time = local.Date == DateTime.Today ? local.ToString("HH:mm:ss") : local.ToString("MM-dd HH:mm:ss");
-        bool mine = e.OriginDeviceId == _deviceId;
-        string source = mine ? "本机复制" : $"来自 {e.OriginName}";
-        return mine && e.LocalOnly ? $"{source} · {time} · 未同步" : $"{source} · {time}";
     }
 
     private static string Preview(string? text)
@@ -794,7 +771,6 @@ internal static class Program
                 {
                     Key = "devices_table",
                     Type = "table",
-                    Subtitle = "点击“共享”向对方发起请求，对方同意后双方复制的内容立即互相同步；以后再连接无需再次同意",
                     Placeholder = "暂无发现组网内运行剪贴板共享的设备（双方都需要安装并启用本插件）",
                     Columns =
                     [
@@ -855,12 +831,10 @@ internal static class Program
             Title = "剪贴板历史",
             Items =
             [
-                new UiItem { Key = "history_status", Type = "status", Label = "记录", Value = J(BuildHistoryStatus()) },
                 new UiItem
                 {
                     Key = "history",
                     Type = "card_list",
-                    Subtitle = "左侧色条表示复制后经过的时间；掉线重连后两边的记录按复制时间合并，合并来的记录带“重连合并”标签",
                     Placeholder = "暂无记录，复制文字或图片后会显示在这里",
                     RowActions =
                     [
@@ -895,8 +869,6 @@ internal static class Program
 
     private static double ParseLatency(string? raw) =>
         double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var ms) ? ms : double.MaxValue;
-
-    private static string FormatBytes(long bytes) => UiNumberFormat.Scaled(bytes, 1024, ["B", "KB", "MB", "GB"]);
 
     private static async Task SafeAsync(Func<Task> action)
     {

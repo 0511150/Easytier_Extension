@@ -429,6 +429,12 @@ public sealed partial class MainWindow : Window, IHostUiBridge
         _activeRoute = route;
         HighlightActiveNav();
         RenderActiveRoute();
+
+        var parts = route.Split(':', 3);
+        if (parts.Length == 3 && parts[0] == "plugin")
+        {
+            _ = _pluginManager.SendPageOpenedAsync(parts[1], parts[2]);
+        }
     }
 
     private void UpdateStatusPill(List<HostNetworkStatus> networks)
@@ -761,7 +767,12 @@ public sealed partial class MainWindow : Window, IHostUiBridge
         var ipModeCombo = new ComboBox { MinWidth = 150 };
         ipModeCombo.Items.Add(new ComboBoxItem { Content = "DHCP 自动获取" });
         ipModeCombo.Items.Add(new ComboBoxItem { Content = "静态 IPv4" });
-        var staticIpBox = new TextBox { Text = profile.StaticIpv4, MinWidth = 162, PlaceholderText = "10.10.10.10/24" };
+        var staticIpBox = new TextBox
+        {
+            Text = NetworkConfigToml.DisplayIpv4(profile.StaticIpv4.Length > 0 ? profile.StaticIpv4 : NetworkConfigToml.DefaultStaticIpv4),
+            MinWidth = 162,
+            PlaceholderText = NetworkConfigToml.DisplayIpv4(NetworkConfigToml.DefaultStaticIpv4)
+        };
         var addressPanel = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, VerticalAlignment = VerticalAlignment.Center };
         addressPanel.Children.Add(staticIpBox);
         addressPanel.Children.Add(ipModeCombo);
@@ -840,7 +851,7 @@ public sealed partial class MainWindow : Window, IHostUiBridge
                 secretBox.Text = v.NetworkSecret;
                 hostBox.Text = v.Hostname;
                 ipModeCombo.SelectedIndex = v.Dhcp ? 0 : 1;
-                if (!v.Dhcp || v.StaticIpv4.Length > 0) staticIpBox.Text = v.StaticIpv4;
+                if (!v.Dhcp || v.StaticIpv4.Length > 0) staticIpBox.Text = NetworkConfigToml.DisplayIpv4(v.StaticIpv4);
                 protocolCombo.SelectedIndex = v.Protocol switch
                 {
                     NetworkFormValues.ProtocolKcp => 1,
@@ -1220,25 +1231,22 @@ public sealed partial class MainWindow : Window, IHostUiBridge
         stack.Children.Add(topRow);
         stack.Children.Add(new Border { Height = 1, Background = new SolidColorBrush(Color.FromArgb(255, 40, 40, 46)), Margin = new Thickness(0, -10, 0, 2) });
 
-        // 2. Store Heading + Refresh
-        var headingGrid = new Grid { ColumnSpacing = 12 };
-        headingGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        headingGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        // 2. 标题、搜索、分类、刷新同一行
+        var filterGrid = new Grid { ColumnSpacing = 10 };
+        filterGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        filterGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        filterGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        filterGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-        var headingText = new StackPanel { Spacing = 2 };
-        headingText.Children.Add(new TextBlock
+        var headingText = new TextBlock
         {
             Text = _activeMarketTab == "official" ? "官方商店" : "第三方商店",
             FontSize = 16,
             FontWeight = FontWeights.SemiBold,
-            Foreground = new SolidColorBrush(Color.FromArgb(255, 243, 244, 246))
-        });
-        headingText.Children.Add(new TextBlock
-        {
-            Text = _activeMarketTab == "official" ? "官方发布与审核的插件" : "来自已启用第三方订阅来源的扩展插件",
-            FontSize = 12.5,
-            Foreground = new SolidColorBrush(Color.FromArgb(255, 156, 163, 175))
-        });
+            Foreground = new SolidColorBrush(Color.FromArgb(255, 243, 244, 246)),
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 6, 0)
+        };
 
         var refreshBtn = new Button { Content = _registryLoading ? "刷新中..." : "刷新", IsEnabled = !_registryLoading, VerticalAlignment = VerticalAlignment.Center };
         refreshBtn.Click += (_, _) =>
@@ -1248,21 +1256,12 @@ public sealed partial class MainWindow : Window, IHostUiBridge
                 _ = LoadMarketplaceRegistryAsync();
             }
         };
-        Grid.SetColumn(headingText, 0);
-        Grid.SetColumn(refreshBtn, 1);
-        headingGrid.Children.Add(headingText);
-        headingGrid.Children.Add(refreshBtn);
-        stack.Children.Add(headingGrid);
-
-        // 3. Search & Category Filter Bar
-        var filterGrid = new Grid { ColumnSpacing = 10 };
-        filterGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        filterGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
         var searchBox = new TextBox
         {
             PlaceholderText = "搜索插件...",
-            Text = _marketSearchQuery
+            Text = _marketSearchQuery,
+            VerticalAlignment = VerticalAlignment.Center
         };
         searchBox.TextChanged += (_, _) =>
         {
@@ -1278,7 +1277,7 @@ public sealed partial class MainWindow : Window, IHostUiBridge
             .OrderBy(c => c, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        var catCombo = new ComboBox { MinWidth = 150 };
+        var catCombo = new ComboBox { MinWidth = 150, VerticalAlignment = VerticalAlignment.Center };
         catCombo.Items.Add(new ComboBoxItem { Content = "全部分类", Tag = "__all__" });
         foreach (var cat in categories)
         {
@@ -1307,13 +1306,17 @@ public sealed partial class MainWindow : Window, IHostUiBridge
             }
         };
 
-        Grid.SetColumn(searchBox, 0);
-        Grid.SetColumn(catCombo, 1);
+        Grid.SetColumn(headingText, 0);
+        Grid.SetColumn(searchBox, 1);
+        Grid.SetColumn(catCombo, 2);
+        Grid.SetColumn(refreshBtn, 3);
+        filterGrid.Children.Add(headingText);
         filterGrid.Children.Add(searchBox);
         filterGrid.Children.Add(catCombo);
+        filterGrid.Children.Add(refreshBtn);
         stack.Children.Add(filterGrid);
 
-        // 4. Cards Container
+        // 3. Cards Container
         _marketCardsContainer = new StackPanel { Spacing = 10 };
         stack.Children.Add(_marketCardsContainer);
 

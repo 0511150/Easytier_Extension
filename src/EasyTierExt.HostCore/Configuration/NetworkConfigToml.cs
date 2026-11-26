@@ -45,11 +45,21 @@ public static class NetworkConfigToml
 
     public const string AssistantUrl = "https://easytier.cn/assistant/";
 
-    /// <summary>静态地址未写掩码时按 /24 处理（核心会将其视为 /32）。</summary>
+    /// <summary>新建网络时静态地址的默认值。</summary>
+    public const string DefaultStaticIpv4 = "10.10.10.255/32";
+
+    /// <summary>静态地址未写掩码时按 /32 处理（与核心一致）。</summary>
     public static string NormalizeIpv4(string? value)
     {
         var v = (value ?? string.Empty).Trim();
-        return v.Length == 0 || v.Contains('/') ? v : v + "/24";
+        return v.Length == 0 || v.Contains('/') ? v : v + "/32";
+    }
+
+    /// <summary>界面显示用：/32 不显示，其他掩码照常显示。</summary>
+    public static string DisplayIpv4(string? value)
+    {
+        var v = NormalizeIpv4(value);
+        return v.EndsWith("/32", StringComparison.Ordinal) ? v[..^3] : v;
     }
 
     /// <exception cref="FormatException">TOML 语法错误，消息含行号。</exception>

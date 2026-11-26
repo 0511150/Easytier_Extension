@@ -20,5 +20,7 @@ public static class IpcMethods
     public const string EventDiscoveryUpdated = "event.discoveryUpdated";
     public const string EventUiAction = "event.uiAction";
     public const string EventViewportChanged = "event.viewportChanged";
+    /// <summary>用户每次从侧栏进入插件页面时发送（1.4.1 起）。</summary>
+    public const string EventPageOpened = "event.pageOpened";
     public const string EventShutdown = "event.shutdown";
 }

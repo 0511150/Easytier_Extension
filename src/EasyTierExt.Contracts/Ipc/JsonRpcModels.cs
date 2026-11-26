@@ -169,6 +169,12 @@ public sealed class EventUiActionParams
     public string? RowId { get; set; }
 }
 
+public sealed class EventPageOpenedParams
+{
+    [JsonPropertyName("menu_id")]
+    public string MenuId { get; set; } = string.Empty;
+}
+
 public sealed class EventViewportChangedParams
 {
     [JsonPropertyName("menu_id")]

@@ -1398,12 +1398,12 @@ public sealed class DeclarativePluginRenderer
                     TextTrimming = TextTrimming.CharacterEllipsis,
                     MaxLines = item.Max is >= 1 ? (int)item.Max.Value : 4,
                     IsTextSelectionEnabled = true,
-                    Margin = new Thickness(0, 2, 0, 0)
+                    Margin = new Thickness(0, content.Children.Count > 0 ? 2 : 0, 0, 0)
                 });
             }
             if (GetJsonString(card, "image_base64") is { Length: > 0 } imageBase64)
             {
-                var img = new Image { Stretch = Stretch.Uniform, MaxHeight = 120, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 4, 0, 0) };
+                var img = new Image { Stretch = Stretch.Uniform, MaxHeight = 120, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, content.Children.Count > 0 ? 4 : 0, 0, 0) };
                 _ = LoadThumbnailAsync(img, null, imageBase64);
                 content.Children.Add(img);
             }

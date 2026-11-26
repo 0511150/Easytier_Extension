@@ -1,7 +1,7 @@
 {
   "id": "clipboard-share",
   "name": "剪贴板共享",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "EasyTier Extension",
   "description": "复制后立即同步到选择的组网设备（首次需对方同意），支持文字与图片；内存中的剪贴板历史按时间分色显示，掉线重连后自动合并，到时自动清除",
   "icon": "📋",

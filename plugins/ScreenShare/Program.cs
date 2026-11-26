@@ -156,6 +156,16 @@ internal static class Program
                 }
                 break;
             }
+            case IpcMethods.EventPageOpened:
+            {
+                // 每次进入页面都重新列出可共享的窗口与显示器并重拍缩略图
+                var ev = @params.Value.Deserialize<EventPageOpenedParams>(IpcJsonContext.Options);
+                if (ev?.MenuId == MainMenuId)
+                {
+                    _ = RefreshThumbnailsAndPushUiAsync(forceRefresh: true);
+                }
+                break;
+            }
             case IpcMethods.EventShutdown:
                 ExitTcs.TrySetResult();
                 break;
