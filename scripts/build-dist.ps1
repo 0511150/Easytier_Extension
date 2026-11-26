@@ -85,7 +85,8 @@ try {
     $SmokePlugins = @(
         @{ Id = "screen-share"; Dir = "ScreenShare" },
         @{ Id = "peer-speedtest"; Dir = "PeerSpeedTest" },
-        @{ Id = "clipboard-share"; Dir = "ClipboardShare" }
+        @{ Id = "clipboard-share"; Dir = "ClipboardShare" },
+        @{ Id = "mouse-share"; Dir = "MouseShare" }
     )
     foreach ($Plugin in $SmokePlugins) {
         $SmokePluginDir = Join-Path $TempSmokeRoot ("plugins\" + $Plugin.Id)

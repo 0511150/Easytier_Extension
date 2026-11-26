@@ -1,0 +1,14 @@
+{
+  "id": "mouse-share",
+  "name": "共享鼠标",
+  "version": "1.0.0",
+  "author": "EasyTier Extension",
+  "description": "用一套键盘鼠标控制虚拟局域网内的多台电脑：拖动排列各台设备的显示器，光标移到相接的屏幕边缘即切换过去，支持按缩放或屏幕尺寸换算",
+  "icon": "🖱️",
+  "category": "远程协作",
+  "min_host_version": "1.4.0",
+  "entry": "MouseShare.exe",
+  "menus": [
+    { "id": "main", "title": "共享鼠标 - 屏幕排列" }
+  ]
+}

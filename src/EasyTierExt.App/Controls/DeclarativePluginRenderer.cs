@@ -293,6 +293,7 @@ public sealed class DeclarativePluginRenderer
     {
         "table" => CreateTable(pluginId, menuId, item, initial),
         "chart" => CreateChart(item, initial),
+        "screen_layout" => CreateScreenLayout(pluginId, menuId, item, initial),
         "source_picker" => CreateSourcePicker(pluginId, menuId, item, initial),
         "text" => CreateText(item, initial),
         "alert" => CreateAlert(item, initial),
@@ -1095,6 +1096,13 @@ public sealed class DeclarativePluginRenderer
         var chart = new TrafficChartView(item, initial);
         _updaters[item.Key] = v => chart.Update(v);
         return chart.Root;
+    }
+
+    private UIElement CreateScreenLayout(string pluginId, string menuId, UiItem item, JsonElement? initial)
+    {
+        var view = new ScreenLayoutView(item, initial, (action, value) => RaiseAsync(pluginId, menuId, item.Key, action, value));
+        _updaters[item.Key] = v => view.Update(v);
+        return WithOptionalHeader(item, view.Root);
     }
 
     // ---------------- 视觉源选择器 ----------------

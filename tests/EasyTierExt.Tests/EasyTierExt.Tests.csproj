@@ -18,5 +18,6 @@
     <ProjectReference Include="..\..\plugins\ScreenShare\ScreenShare.csproj" />
     <ProjectReference Include="..\..\plugins\PeerSpeedTest\PeerSpeedTest.csproj" />
     <ProjectReference Include="..\..\plugins\ClipboardShare\ClipboardShare.csproj" />
+    <ProjectReference Include="..\..\plugins\MouseShare\MouseShare.csproj" />
   </ItemGroup>
 </Project>

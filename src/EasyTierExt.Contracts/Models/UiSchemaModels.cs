@@ -35,7 +35,7 @@ public sealed class UiItem
     /// <summary>
     /// Supported: switch, select, segmented, source_picker, input, number, status, button, table, chart, viewport,
     /// text, alert, badge, divider, progress, slider, checkbox, radio, checklist, textarea, password, link, image,
-    /// key_value, stats, button_group, card_list
+    /// key_value, stats, button_group, card_list, screen_layout
     /// </summary>
     [JsonPropertyName("type")]
     public string Type { get; set; } = "status";

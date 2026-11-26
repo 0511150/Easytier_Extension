@@ -226,6 +226,29 @@ public sealed class UiGalleryWindow : Window
                         },
                         new UiItem { Key = "crd_empty", Type = "card_list", Placeholder = "暂无剪贴板记录，复制任意文字或图片后会显示在这里" }
                     ]
+                },
+                new UiSection
+                {
+                    Id = "screens",
+                    Title = "屏幕排列",
+                    Items =
+                    [
+                        new UiItem
+                        {
+                            Key = "scr", Type = "screen_layout", Label = "屏幕排列 screen_layout", Subtitle = "同一 group 整体拖动，靠近边缘时吸附；点击选中",
+                            Value = J(new
+                            {
+                                selected = "pc:1",
+                                screens = new object[]
+                                {
+                                    new { id = "mac:1", group = "mac", x = -2150, y = 420, w = 2150, h = 1344, number = "1", title = "MacBook", subtitle = "2560 × 1600", tone = "peer" },
+                                    new { id = "pc:1", group = "pc", x = 0, y = 0, w = 2560, h = 1440, number = "2", title = "主电脑", subtitle = "2560 × 1440", tone = "self", active = true },
+                                    new { id = "pc:2", group = "pc", x = 2560, y = -720, w = 1080, h = 1920, number = "3", title = "副屏", subtitle = "1080 × 1920", tone = "self" },
+                                    new { id = "nb:1", group = "nb", x = 420, y = 1440, w = 1920, h = 1080, number = "4", title = "笔记本", subtitle = "1920 × 1080", tone = "offline" }
+                                }
+                            })
+                        }
+                    ]
                 }
             ]
         };
