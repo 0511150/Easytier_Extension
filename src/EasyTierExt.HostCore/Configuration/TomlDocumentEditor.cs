@@ -65,6 +65,16 @@ internal sealed class TomlDocumentEditor
 
     public bool Contains(string section, string key) => Find(section, key) is not null;
 
+    /// <summary>读取字符串数组（如 listeners）；键不存在时返回 null。只提取数组中的字符串字面量。</summary>
+    public List<string>? GetStringArray(string section, string key)
+    {
+        var entry = Find(section, key);
+        if (entry is null) return null;
+        return System.Text.RegularExpressions.Regex.Matches(_text[entry.ValueStart..entry.ValueEnd], @"""((?:[^""\\]|\\.)*)""|'([^']*)'")
+            .Select(m => m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value)
+            .ToList();
+    }
+
     /// <summary>写入键值；section 为空串表示顶层。</summary>
     public void Set(string section, string key, string rawValue)
     {

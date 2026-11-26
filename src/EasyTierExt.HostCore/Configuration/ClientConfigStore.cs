@@ -31,6 +31,12 @@ public sealed class ClientConfig
 {
     public const string OfficialStoreUrl = "https://0511150.github.io/Easytier_Extension_Registry/registry.json";
 
+    /// <summary>配置格式版本：2 起新建网络默认不监听端口，并迁移旧版默认监听。</summary>
+    public const int CurrentConfigVersion = 2;
+
+    [JsonPropertyName("config_version")]
+    public int ConfigVersion { get; set; }
+
     [JsonPropertyName("marketplace_url")]
     public string MarketplaceUrl { get; set; } = "market/registry.json";
 
@@ -188,6 +194,7 @@ public sealed class ClientConfigStore
         {
             var defaultConfig = new ClientConfig
             {
+                ConfigVersion = ClientConfig.CurrentConfigVersion,
                 Networks = [new NetworkProfile()]
             };
             Save(defaultConfig);
@@ -205,6 +212,12 @@ public sealed class ClientConfigStore
         foreach (var n in cfg.Networks.Where(n => n.Ipv4Mode == "dhcp" && n.StaticIpv4 == NetworkProfile.LegacyDefaultStaticIpv4))
         {
             n.StaticIpv4 = NetworkConfigToml.DefaultStaticIpv4;
+            changed = true;
+        }
+        if (cfg.ConfigVersion < 2)
+        {
+            foreach (var n in cfg.Networks) NetworkConfigToml.DisableLegacyDefaultListeners(n);
+            cfg.ConfigVersion = ClientConfig.CurrentConfigVersion;
             changed = true;
         }
         if (EnsureNetworkConfigs(cfg) || changed)

@@ -223,6 +223,74 @@ public class NetworkConfigTomlTests
     }
 
     [Fact]
+    public void NewProfile_DoesNotListen_SoSeveralNetworksCanRunTogether()
+    {
+        var p = new NetworkProfile();
+        NetworkConfigToml.EnsureGenerated(p);
+        Assert.Contains("listeners = []", p.ConfigToml);
+        Assert.DoesNotContain("0.0.0.0:11010", p.ConfigToml);
+    }
+
+    [Theory]
+    [InlineData("listeners = [\"tcp://0.0.0.0:11010\", \"udp://0.0.0.0:11010\"]\n", true)]
+    [InlineData("listeners = [\n  \"udp://0.0.0.0:11010\", # 注释\n  \"tcp://0.0.0.0:11010\",\n]\n", true)]
+    [InlineData("listeners = [\"tcp://0.0.0.0:11020\", \"udp://0.0.0.0:11020\"]\n", false)]
+    [InlineData("listeners = [\"tcp://0.0.0.0:11010\"]\n", false)]
+    [InlineData("listeners = []\n", false)]
+    [InlineData("hostname = \"a\"\n", false)]
+    public void LegacyDefaultListeners_AreDisabled_CustomOnesKept(string listenersLine, bool expectChanged)
+    {
+        var p = new NetworkProfile { ConfigToml = "instance_name = \"x\"\n" + listenersLine + "\n[network_identity]\nnetwork_name = \"n\"\n" };
+        var before = p.ConfigToml;
+        Assert.Equal(expectChanged, NetworkConfigToml.DisableLegacyDefaultListeners(p));
+        if (expectChanged)
+        {
+            Assert.Contains("listeners = []", p.ConfigToml);
+            Assert.DoesNotContain("0.0.0.0:11010", p.ConfigToml);
+            Assert.Contains("network_name = \"n\"", p.ConfigToml);
+        }
+        else
+        {
+            Assert.Equal(before, p.ConfigToml);
+        }
+    }
+
+    [Fact]
+    public void ClientConfigStore_MigratesOldDefaultListenersOnce()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"et_cfg_listen_{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(root, "config"));
+            var path = Path.Combine(root, "config", "client.json");
+            File.WriteAllText(path, """
+                { "networks": [
+                  { "network_id": "a", "config_toml": "instance_name = \"a\"\nlisteners = [\"tcp://0.0.0.0:11010\", \"udp://0.0.0.0:11010\"]\n" },
+                  { "network_id": "b", "config_toml": "instance_name = \"b\"\nlisteners = [\"tcp://0.0.0.0:12345\"]\n" },
+                  { "network_id": "c", "network_name": "legacy", "listeners": ["tcp://0.0.0.0:11010", "udp://0.0.0.0:11010"] }
+                ] }
+                """);
+
+            var store = new ClientConfigStore(root);
+            var cfg = store.Load();
+            Assert.Equal(ClientConfig.CurrentConfigVersion, cfg.ConfigVersion);
+            Assert.Contains("listeners = []", cfg.Networks[0].ConfigToml);
+            Assert.Contains("tcp://0.0.0.0:12345", cfg.Networks[1].ConfigToml);
+            Assert.Contains("listeners = []", cfg.Networks[2].ConfigToml);
+
+            // 迁移只做一次：之后用户手动改回 11010 不会被再次清掉
+            cfg.Networks[0].ConfigToml = cfg.Networks[0].ConfigToml.Replace(
+                "listeners = []", "listeners = [\"tcp://0.0.0.0:11010\", \"udp://0.0.0.0:11010\"]");
+            store.Save(cfg);
+            Assert.Contains("11010", new ClientConfigStore(root).Load().Networks[0].ConfigToml);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, true);
+        }
+    }
+
+    [Fact]
     public void PeersWithoutVirtualIp_AreHidden_ExceptSelf()
     {
         Assert.False(EasyTierManager.IsVisiblePeer(new HostPeerInfo { Hostname = "easytier-cf-relay" }));

@@ -215,6 +215,34 @@ public static class NetworkConfigToml
         if (values.StaticIpv4.Length > 0) profile.StaticIpv4 = values.StaticIpv4;
     }
 
+    /// <summary>1.4.1 及以前为每个网络自动写入的监听端口。多个网络都监听 11010 时只有第一个能启动。</summary>
+    public static readonly string[] LegacyDefaultListeners = ["tcp://0.0.0.0:11010", "udp://0.0.0.0:11010"];
+
+    private static bool IsLegacyDefaultListeners(IEnumerable<string> listeners) =>
+        listeners.Select(l => l.Trim()).ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals(LegacyDefaultListeners);
+
+    /// <summary>
+    /// 一次性迁移：把旧版自动写入的默认监听改为不监听（listeners = []）。
+    /// 用户自己改过的端口不受影响。返回配置是否变化。
+    /// </summary>
+    public static bool DisableLegacyDefaultListeners(NetworkProfile profile)
+    {
+        if (string.IsNullOrWhiteSpace(profile.ConfigToml)) return false;
+        try
+        {
+            var doc = new TomlDocumentEditor(profile.ConfigToml);
+            var listeners = doc.GetStringArray("", "listeners");
+            if (listeners is null || !IsLegacyDefaultListeners(listeners)) return false;
+            doc.Set("", "listeners", "[]");
+            profile.ConfigToml = doc.Text;
+            return true;
+        }
+        catch (Exception ex) when (ex is FormatException or ArgumentException)
+        {
+            return false; // 解析不了的配置原样保留，绝不影响启动
+        }
+    }
+
     private static string Generate(NetworkProfile p)
     {
         var legacy = p.LegacyFields;
@@ -226,7 +254,9 @@ public static class NetworkConfigToml
             "public" => [LegacyString(legacy, "public_server") ?? NetworkProfile.DefaultPeer],
             _ => p.PeerUrls
         };
-        var listeners = LegacyList(legacy, "listeners") ?? ["tcp://0.0.0.0:11010", "udp://0.0.0.0:11010"];
+        // 默认不监听端口：多个网络才能同时运行；旧版界面自动填的 11010 也视为未设置
+        var legacyListeners = LegacyList(legacy, "listeners");
+        List<string> listeners = legacyListeners is not null && !IsLegacyDefaultListeners(legacyListeners) ? legacyListeners : [];
 
         var sb = new StringBuilder();
         sb.Append($"instance_name = {Q(p.NetworkId)}\n");
