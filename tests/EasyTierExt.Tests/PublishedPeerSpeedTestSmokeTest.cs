@@ -43,6 +43,8 @@ public class PublishedPeerSpeedTestSmokeTest
             Assert.Contains("peers_table", keys);
             Assert.Contains("history_table", keys);
             Assert.Contains("btn_cancel", keys);
+            Assert.Contains(schema.Sections.SelectMany(s => s.Items), i => i.Key == "chart" && i.Type == "chart");
+            Assert.DoesNotContain("allow_incoming", keys);
 
             // 启动后会推送一次节点表与记录表
             var values = await bridge.TablesPushed.Task.WaitAsync(TimeSpan.FromSeconds(10));

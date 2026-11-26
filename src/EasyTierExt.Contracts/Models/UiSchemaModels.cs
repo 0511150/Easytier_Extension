@@ -33,7 +33,7 @@ public sealed class UiItem
     public string Key { get; set; } = string.Empty;
 
     /// <summary>
-    /// Supported: switch, select, segmented, source_picker, input, number, status, button, table, viewport
+    /// Supported: switch, select, segmented, source_picker, input, number, status, button, table, chart, viewport
     /// </summary>
     [JsonPropertyName("type")]
     public string Type { get; set; } = "status";

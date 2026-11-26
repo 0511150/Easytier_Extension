@@ -54,7 +54,16 @@ try {
         throw "EasyTier core binaries not found. Set EASYTIER_CORE_SRC or place binaries in dist\core."
     }
 
-    if (Test-Path $Dist) { Remove-Item $Dist -Recurse -Force }
+    if (Test-Path $Dist) {
+        # 有客户端正从 dist 运行时停止，避免删到一半留下残缺目录（管理员进程的路径对普通进程不可见，只能看文件是否被占用）
+        $Locked = Get-ChildItem $Dist -Recurse -File -Include *.exe, *.dll, *.sys | Where-Object {
+            try { $s = [System.IO.File]::Open($_.FullName, 'Open', 'ReadWrite', 'None'); $s.Dispose(); $false } catch { $true }
+        } | Select-Object -First 3
+        if ($Locked) {
+            throw "dist 中的文件正在使用（$(($Locked | ForEach-Object Name) -join ', ')），请先退出从 dist 运行的客户端后再打包。"
+        }
+        Remove-Item $Dist -Recurse -Force
+    }
     New-Item -ItemType Directory -Path $Dist | Out-Null
 
     Write-Host "[3/6] Publishing EasyTierExt.App (Self-Contained + ReadyToRun)..."

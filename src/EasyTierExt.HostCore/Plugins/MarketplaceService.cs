@@ -315,6 +315,7 @@ public sealed class MarketplaceService
         IProgress<double>? progress,
         CancellationToken ct = default)
     {
+        EnsureHostVersion(entry.Name, entry.MinHostVersion);
         var tempZip = Path.Combine(Path.GetTempPath(), $"et_plugin_{Guid.NewGuid():N}.zip");
         try
         {
@@ -398,6 +399,8 @@ public sealed class MarketplaceService
                 throw new InvalidDataException($"插件清单校验失败: {error}");
             }
 
+            EnsureHostVersion(manifest.Name, manifest.MinHostVersion);
+
             var entryPath = Path.Combine(rootDir, manifest.Entry);
             if (!File.Exists(entryPath))
             {
@@ -419,6 +422,30 @@ public sealed class MarketplaceService
             {
                 try { Directory.Delete(stagingDir, recursive: true); } catch { }
             }
+        }
+    }
+
+    /// <summary>主程序版本是否满足插件声明的 min_host_version；无法解析的版本号视为满足。</summary>
+    public static bool IsHostVersionSatisfied(string? minHostVersion, string hostVersion)
+    {
+        static Version? Parse(string? v)
+        {
+            if (string.IsNullOrWhiteSpace(v)) return null;
+            var core = v.Trim().TrimStart('v', 'V').Split('-', '+')[0];
+            return Version.TryParse(core.Contains('.') ? core : core + ".0", out var parsed) ? parsed : null;
+        }
+
+        var min = Parse(minHostVersion);
+        var host = Parse(hostVersion);
+        return min is null || host is null || host >= min;
+    }
+
+    private static void EnsureHostVersion(string pluginName, string? minHostVersion)
+    {
+        var host = Update.ClientUpdateService.GetCurrentVersion();
+        if (!IsHostVersionSatisfied(minHostVersion, host))
+        {
+            throw new InvalidOperationException($"“{pluginName}”需要主程序 {minHostVersion} 或更高版本（当前 {host}），请先更新主程序。");
         }
     }
 

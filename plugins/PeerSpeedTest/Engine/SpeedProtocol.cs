@@ -4,21 +4,37 @@ using System.Text.Json.Serialization;
 namespace PeerSpeedTest.Engine;
 
 /// <summary>
-/// 测速协议（TCP，单行 JSON 握手 + 原始数据）：
-/// 1. 客户端发送一行 <see cref="SpeedRequest"/>；服务端回复一行 <see cref="SpeedReply"/>（ok=false 时附带 error 并关闭）。
-/// 2. ping：客户端发送 16 字节帧，服务端原样回显，直到客户端关闭连接。
-/// 3. download：服务端连续发送随机数据 duration_ms 毫秒后关闭发送方向，客户端统计接收速率。
-/// 4. upload：客户端连续发送 duration_ms 毫秒后关闭发送方向，服务端回复一行统计结果（预热后的 bytes / ms）。
+/// 测速协议 v2（TCP，单行 JSON 握手 + 原始数据）：
+/// 1. request：发起方先建立控制连接并发送 hostname，被测方弹出确认；同意后回复 token，控制连接保持到测速结束。
+///    控制连接断开或被测方中止时，该 token 下的全部连接立即关闭。
+/// 2. ping / download / upload：数据连接必须携带有效 token，且来源 IP 与控制连接一致。
+///    - ping：16 字节帧原样回显，直到发起方关闭连接；
+///    - download：被测方持续发送 duration_ms 毫秒；
+///    - upload：发起方持续发送，关闭发送方向后被测方回复收到的字节数。
 /// </summary>
 public static class SpeedProtocol
 {
     public const int DefaultPort = 39700;
     public const string Magic = "ETSPEED";
-    public const int Version = 1;
+    public const int Version = 2;
 
+    public const string OpRequest = "request";
     public const string OpPing = "ping";
     public const string OpDownload = "download";
     public const string OpUpload = "upload";
+
+    public const string ErrorBusy = "busy";
+    public const string ErrorRejected = "rejected";
+    public const string ErrorTimeout = "timeout";
+    public const string ErrorUnauthorized = "unauthorized";
+    public const string ErrorUnsupported = "unsupported_op";
+
+    /// <summary>每个方向固定测试 15 秒。</summary>
+    public const int PhaseDurationMs = 15_000;
+    /// <summary>结果取每个方向最后 5 秒的平均速率。</summary>
+    public const int AverageWindowMs = 5_000;
+    public const int SampleIntervalMs = 100;
+    public const int ConsentTimeoutMs = 30_000;
 
     public const int MinDurationMs = 1_000;
     public const int MaxDurationMs = 30_000;
@@ -30,9 +46,6 @@ public static class SpeedProtocol
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
-
-    /// <summary>开头这段时间的数据不计入结果，避开 TCP 慢启动。</summary>
-    public static int WarmupMs(int durationMs) => Math.Min(1_000, durationMs / 4);
 
     public static int ClampDuration(int durationMs) => Math.Clamp(durationMs, MinDurationMs, MaxDurationMs);
 
@@ -80,6 +93,8 @@ public sealed class SpeedRequest
     [JsonPropertyName("v")] public int Version { get; set; } = SpeedProtocol.Version;
     [JsonPropertyName("op")] public string Op { get; set; } = string.Empty;
     [JsonPropertyName("duration_ms")] public int DurationMs { get; set; }
+    [JsonPropertyName("token")] public string? Token { get; set; }
+    [JsonPropertyName("hostname")] public string? Hostname { get; set; }
 }
 
 public sealed class SpeedReply
@@ -87,8 +102,12 @@ public sealed class SpeedReply
     [JsonPropertyName("ok")] public bool Ok { get; set; }
     [JsonPropertyName("error")] public string? Error { get; set; }
     [JsonPropertyName("v")] public int? Version { get; set; }
+    [JsonPropertyName("token")] public string? Token { get; set; }
     [JsonPropertyName("bytes")] public long? Bytes { get; set; }
     [JsonPropertyName("ms")] public double? Ms { get; set; }
 }
+
+/// <summary>被测方收到的测速请求。</summary>
+public sealed record ConsentRequest(string Hostname, System.Net.IPAddress RemoteIp);
 
 public sealed class SpeedTestException(string message, Exception? inner = null) : Exception(message, inner);

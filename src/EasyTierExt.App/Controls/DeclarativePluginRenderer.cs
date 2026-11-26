@@ -218,9 +218,12 @@ public sealed class DeclarativePluginRenderer
             foreach (var item in section.Items)
             {
                 var initial = ResolveValue(item, cachedValues);
-                var el = item.Type == "table"
-                    ? CreateTable(pluginId, menuId, item, initial)
-                    : CreateOptionRow(pluginId, menuId, item, initial);
+                var el = item.Type switch
+                {
+                    "table" => CreateTable(pluginId, menuId, item, initial),
+                    "chart" => CreateChart(item, initial),
+                    _ => CreateOptionRow(pluginId, menuId, item, initial)
+                };
 
                 if (string.Equals(item.Column, "left", StringComparison.OrdinalIgnoreCase))
                 {
@@ -270,6 +273,10 @@ public sealed class DeclarativePluginRenderer
                 if (item.Type == "table")
                 {
                     stack.Children.Add(CreateTable(pluginId, menuId, item, initial));
+                }
+                else if (item.Type == "chart")
+                {
+                    stack.Children.Add(CreateChart(item, initial));
                 }
                 else
                 {
@@ -984,7 +991,7 @@ public sealed class DeclarativePluginRenderer
             {
                 container.Children.Add(new TextBlock
                 {
-                    Text = "暂无发现组网内同插件在线节点",
+                    Text = string.IsNullOrWhiteSpace(item.Placeholder) ? "暂无发现组网内同插件在线节点" : item.Placeholder,
                     FontSize = 13,
                     Margin = new Thickness(10, 8, 10, 4),
                     Foreground = new SolidColorBrush(Color.FromArgb(255, 107, 114, 128))
@@ -1074,6 +1081,13 @@ public sealed class DeclarativePluginRenderer
         };
 
         return container;
+    }
+
+    private FrameworkElement CreateChart(UiItem item, JsonElement? initial)
+    {
+        var chart = new TrafficChartView(item, initial);
+        _updaters[item.Key] = v => chart.Update(v);
+        return chart.Root;
     }
 
     private static JsonElement? ResolveValue(UiItem item, Dictionary<string, JsonElement>? cachedValues)
