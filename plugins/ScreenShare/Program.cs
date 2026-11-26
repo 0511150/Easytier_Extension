@@ -630,7 +630,8 @@ internal static class Program
         if (_sharingEnabled)
         {
             int viewers = _server?.ActiveViewerCount ?? 0;
-            return $"共享中 · {runningNets} 个虚拟网络在线 · 观众 {viewers} 人";
+            string encoder = viewers > 0 && _server?.EncoderDescription is { } desc ? $" · {desc}" : string.Empty;
+            return $"共享中 · {runningNets} 个虚拟网络在线 · 观众 {viewers} 人{encoder}";
         }
 
         return runningNets > 0

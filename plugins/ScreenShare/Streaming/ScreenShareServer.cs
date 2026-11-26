@@ -143,7 +143,10 @@ public sealed class ScreenShareServer : IAsyncDisposable
     private CancellationTokenSource? _cts;
     private Task? _captureTask;
     private WasapiLoopbackOpusCapturer? _audioCapturer;
-    private MfH264Encoder? _encoder;
+    private MfVideoEncoder? _encoder;
+    // 本次共享中出过故障的编码器（格式, 是否硬件），不再重试
+    private readonly HashSet<(VideoCodec Codec, bool Hardware)> _failedEncoders = [];
+    private volatile bool _codecDirty;
     private string? _controllerSessionId;
     private uint _frameCounter;
     private uint _audioSeq;
@@ -153,6 +156,9 @@ public sealed class ScreenShareServer : IAsyncDisposable
     private int _activeDstH = 1080;
 
     public int ActiveViewerCount => _viewers.Count;
+
+    /// <summary>当前编码器，如“H.265 硬件编码”；还没开始编码时为 null。</summary>
+    public string? EncoderDescription => _encoder?.Description;
     public bool IsRunning => _cts is not null && !_cts.IsCancellationRequested;
     public event Action? StateChanged;
     public event Action? CaptureTargetClosed;
@@ -287,7 +293,9 @@ public sealed class ScreenShareServer : IAsyncDisposable
 
             int viewerUdpPort = hello.UdpPort > 0 ? hello.UdpPort : MediaUdpPort;
             var session = new ViewerSession(sessionId, tcp, writer, new IPEndPoint(remoteIp, viewerUdpPort));
+            session.SetCodecs(hello.Codecs);
             _viewers[sessionId] = session;
+            _codecDirty = true;
             StateChanged?.Invoke();
 
             var enc = _encoder;
@@ -298,6 +306,7 @@ public sealed class ScreenShareServer : IAsyncDisposable
                 Width = enc?.Width ?? 1920,
                 Height = enc?.Height ?? 1080,
                 Fps = _settings.Fps,
+                Codec = enc is null ? null : VideoCodecs.ToWire(enc.Codec),
                 AllowControl = _settings.AllowRemoteControl,
                 ControllerBusy = _controllerSessionId is not null
             });
@@ -314,6 +323,11 @@ public sealed class ScreenShareServer : IAsyncDisposable
                 {
                     case "pli":
                         _encoder?.RequestKeyFrame();
+                        break;
+                    case "codecs":
+                        // 观看端发现解不了当前格式（如 H.265 硬解失败），更新能力后重新选格式
+                        session.SetCodecs(msg.Codecs);
+                        _codecDirty = true;
                         break;
                     case "mute":
                         session.AudioMuted = msg.Muted;
@@ -359,6 +373,7 @@ public sealed class ScreenShareServer : IAsyncDisposable
         finally
         {
             _viewers.TryRemove(sessionId, out _);
+            _codecDirty = true;
             lock (_controlLock)
             {
                 if (_controllerSessionId == sessionId) _controllerSessionId = null;
@@ -413,8 +428,13 @@ public sealed class ScreenShareServer : IAsyncDisposable
             int srcW = Math.Max(2, capturer.Width);
             int srcH = Math.Max(2, capturer.Height);
             var (dstW, dstH) = ResolutionPresets.ResolveTargetSize(srcW, srcH, _settings.Resolution, isWindowMode);
+            int targetW = dstW;
+            int targetH = dstH;
 
-            _encoder = CreateEncoderWithFallback(dstW, dstH, _settings.Fps, _settings.BitrateMbps);
+            _failedEncoders.Clear();
+            _codecDirty = false;
+            var requestedCodec = DesiredCodec();
+            _encoder = CreateEncoder(requestedCodec, targetW, targetH);
             dstW = _encoder.Width;
             dstH = _encoder.Height;
             _activeSrcW = srcW;
@@ -456,13 +476,15 @@ public sealed class ScreenShareServer : IAsyncDisposable
                         staging = CreateStagingTexture(device, srcW, srcH);
 
                         var (nextDstW, nextDstH) = ResolutionPresets.ResolveTargetSize(srcW, srcH, _settings.Resolution, isWindowMode);
-                        if (nextDstW != dstW || nextDstH != dstH)
+                        if (nextDstW != targetW || nextDstH != targetH)
                         {
+                            targetW = nextDstW;
+                            targetH = nextDstH;
                             _encoder.Dispose();
-                            _encoder = CreateEncoderWithFallback(nextDstW, nextDstH, _settings.Fps, _settings.BitrateMbps);
+                            _encoder = CreateEncoder(requestedCodec, targetW, targetH);
                             dstW = _encoder.Width;
                             dstH = _encoder.Height;
-                            BroadcastVideoConfig(dstW, dstH, _settings.Fps);
+                            BroadcastVideoConfig(dstW, dstH, _settings.Fps, _encoder.Codec);
                         }
 
                         _activeSrcW = srcW;
@@ -472,15 +494,44 @@ public sealed class ScreenShareServer : IAsyncDisposable
                         ColorConvert.FillNv12Black(_encoder.Nv12Buffer, dstW, dstH);
                     }
 
+                    // 观众变化（能否解 H.265）或编码器故障时换编码器：H.265 硬件 → H.264 硬件 → H.264 软件
+                    bool rebuild = false;
+                    if (_codecDirty)
+                    {
+                        _codecDirty = false;
+                        var want = DesiredCodec();
+                        if (want != requestedCodec)
+                        {
+                            requestedCodec = want;
+                            rebuild = true;
+                        }
+                    }
+                    if (_encoder.IsFaulted)
+                    {
+                        _failedEncoders.Add((_encoder.Codec, _encoder.IsHardware));
+                        rebuild = true;
+                    }
+                    if (rebuild)
+                    {
+                        var previous = _encoder;
+                        previous.Dispose();
+                        _encoder = CreateEncoder(requestedCodec, targetW, targetH);
+                        if (_encoder.Width != dstW || _encoder.Height != dstH || _encoder.Codec != previous.Codec)
+                        {
+                            dstW = _encoder.Width;
+                            dstH = _encoder.Height;
+                            _activeDstW = dstW;
+                            _activeDstH = dstH;
+                            BroadcastVideoConfig(dstW, dstH, _settings.Fps, _encoder.Codec);
+                        }
+                        ColorConvert.FillNv12Black(_encoder.Nv12Buffer, dstW, dstH);
+                        StateChanged?.Invoke();
+                    }
+
                     context.CopyResource(staging, gpuTex);
                     ConvertStagingToNv12(context, staging, srcW, srcH, _encoder.Nv12Buffer, dstW, dstH);
-                    var encoded = _encoder.EncodeNv12(ptsHns, frameDurationHns);
+                    _encoder.EncodeNv12(ptsHns, frameDurationHns);
                     ptsHns += frameDurationHns;
-
-                    if (encoded is { Length: > 0 })
-                    {
-                        FanoutVideoFrame(encoded, ptsHns / 10);
-                    }
                 }
 
                 int elapsed = (int)(Environment.TickCount64 - startTick);
@@ -531,29 +582,60 @@ public sealed class ScreenShareServer : IAsyncDisposable
             CPUAccessFlags = CpuAccessFlags.Read
         });
 
-    private static MfH264Encoder CreateEncoderWithFallback(int dstW, int dstH, int fps, int bitrateMbps)
+    /// <summary>所有观众都能硬解 H.265 时用 H.265，否则 H.264（旧版观看端不上报能力，按只支持 H.264 处理）。</summary>
+    private VideoCodec DesiredCodec()
     {
-        try
+        bool any = false;
+        foreach (var viewer in _viewers.Values)
         {
-            return new MfH264Encoder(dstW, dstH, fps, bitrateMbps);
+            any = true;
+            if (!viewer.SupportsHevc) return VideoCodec.H264;
         }
-        catch when (dstW > 1920 || dstH > 1200)
+        return any ? VideoCodec.Hevc : VideoCodec.H264;
+    }
+
+    public static IReadOnlyList<(VideoCodec Codec, bool Hardware)> EncoderCandidates(VideoCodec wanted) =>
+        wanted == VideoCodec.Hevc
+            ? [(VideoCodec.Hevc, true), (VideoCodec.H264, true), (VideoCodec.H264, false)]
+            : [(VideoCodec.H264, true), (VideoCodec.H264, false)];
+
+    private MfVideoEncoder CreateEncoder(VideoCodec wanted, int dstW, int dstH)
+    {
+        foreach (var (codec, hardware) in EncoderCandidates(wanted))
+        {
+            if (_failedEncoders.Contains((codec, hardware))) continue;
+            var encoder = TryCreateEncoder(codec, hardware, dstW, dstH);
+            if (encoder is not null) return encoder;
+        }
+        // 全都失败过：最后再试一次软件 H.264
+        return TryCreateEncoder(VideoCodec.H264, false, dstW, dstH)
+            ?? throw new InvalidOperationException("系统未找到可用的 H.264 / H.265 Media Foundation 编码器。");
+    }
+
+    private MfVideoEncoder? TryCreateEncoder(VideoCodec codec, bool hardware, int dstW, int dstH)
+    {
+        void OnOutput(byte[] data, long ptsHns) => FanoutVideoFrame(data, ptsHns / 10, codec);
+
+        var encoder = MfVideoEncoder.TryCreate(codec, hardware, dstW, dstH, _settings.Fps, _settings.BitrateMbps, OnOutput);
+        if (encoder is null && (dstW > 1920 || dstH > 1200))
         {
             double scale = Math.Min(1920.0 / dstW, 1200.0 / dstH);
             int fbW = Math.Max(64, (int)Math.Round(dstW * scale) & ~1);
             int fbH = Math.Max(64, (int)Math.Round(dstH * scale) & ~1);
-            return new MfH264Encoder(fbW, fbH, fps, bitrateMbps);
+            encoder = MfVideoEncoder.TryCreate(codec, hardware, fbW, fbH, _settings.Fps, _settings.BitrateMbps, OnOutput);
         }
+        return encoder;
     }
 
-    private void BroadcastVideoConfig(int width, int height, int fps)
+    private void BroadcastVideoConfig(int width, int height, int fps, VideoCodec codec)
     {
         var msg = new ControlMsg
         {
             Type = "video_config",
             Width = width,
             Height = height,
-            Fps = fps
+            Fps = fps,
+            Codec = VideoCodecs.ToWire(codec)
         };
         foreach (var session in _viewers.Values)
         {
@@ -581,7 +663,7 @@ public sealed class ScreenShareServer : IAsyncDisposable
         }
     }
 
-    private void FanoutVideoFrame(byte[] annexB, long ptsUs)
+    private void FanoutVideoFrame(byte[] annexB, long ptsUs, VideoCodec codec)
     {
         uint frameId = Interlocked.Increment(ref _frameCounter);
         int sliceCount = (annexB.Length + MaxSlicePayload - 1) / MaxSlicePayload;
@@ -590,7 +672,7 @@ public sealed class ScreenShareServer : IAsyncDisposable
         var packet = new byte[19 + MaxSlicePayload];
         packet[0] = 0x45; // 'E'
         packet[1] = 0x54; // 'T'
-        packet[2] = 0x01; // Video
+        packet[2] = VideoCodecs.ToPacketType(codec); // 0x01 H.264 视频，0x03 H.265 视频（旧版观看端只认 0x01）
 
         for (int i = 0; i < sliceCount; i++)
         {
@@ -738,6 +820,10 @@ public sealed class ScreenShareServer : IAsyncDisposable
         public string Id { get; } = id;
         public IPEndPoint UdpEndPoint { get; } = udpEndPoint;
         public bool AudioMuted { get; set; }
+        public bool SupportsHevc { get; private set; }
+
+        public void SetCodecs(string[]? codecs) =>
+            SupportsHevc = codecs?.Any(c => string.Equals(c, VideoCodecs.HevcWire, StringComparison.OrdinalIgnoreCase)) == true;
 
         public async Task SendAsync(ControlMsg msg)
         {
@@ -779,5 +865,13 @@ public sealed class ScreenShareServer : IAsyncDisposable
         [JsonPropertyName("scan_code")] public ushort ScanCode { get; set; }
         [JsonPropertyName("extended")] public bool Extended { get; set; }
         [JsonPropertyName("key_up")] public bool KeyUp { get; set; }
+
+        /// <summary>hello / codecs：观看端能解的格式（"hevc" 仅在有硬件解码时出现）。</summary>
+        [JsonPropertyName("codecs"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string[]? Codecs { get; set; }
+
+        /// <summary>welcome / video_config：当前发送的格式。</summary>
+        [JsonPropertyName("codec"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? Codec { get; set; }
     }
 }

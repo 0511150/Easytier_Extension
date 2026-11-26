@@ -18,10 +18,22 @@ public sealed class ScreenShareClient : IAsyncDisposable
     private TcpClient? _tcp;
     private StreamWriter? _writer;
     private UdpClient? _udp;
-    private MfH264Decoder? _decoder;
+    // DXVA 解码配置：H.264 VLD（无胶片颗粒）与 HEVC Main
+    private static readonly Guid D3D11DecoderProfileH264 = new("1B81BE68-A0C7-11D3-B984-00C04F2E73C5");
+    private static readonly Guid D3D11DecoderProfileHevcMain = new("5B11D51B-2F4C-4452-BCC3-09F2A1160CC0");
+    private const int MaxFramesWithoutOutput = 90;
+
+    private readonly object _decoderLock = new();
+    private MfVideoDecoder? _decoder;
+    private bool _h264HardwareFailed;
+    private bool? _hevcHardwareSupported;
+    private int _framesWithoutOutput;
     private CancellationTokenSource? _cts;
-    private byte[] _bgraScratch = [];
     private string _displayLabel = string.Empty;
+    private int _streamWidth = 1920;
+    private int _streamHeight = 1080;
+    private int _streamFps;
+    private string _decodeLabel = string.Empty;
 
     public bool IsConnected => _tcp is not null && _tcp.Connected;
     public bool IsMuted { get; private set; }
@@ -75,7 +87,8 @@ public sealed class ScreenShareClient : IAsyncDisposable
         {
             Type = "hello",
             ViewerName = Environment.MachineName,
-            UdpPort = localUdpPort
+            UdpPort = localUdpPort,
+            Codecs = SupportedCodecs()
         });
 
         var welcomeLine = await reader.ReadLineAsync(ct);
@@ -88,8 +101,7 @@ public sealed class ScreenShareClient : IAsyncDisposable
             ?? throw new IOException("握手响应无效。");
 
         _displayLabel = displayLabel;
-        _decoder = new MfH264Decoder(Math.Max(64, welcome.Width), Math.Max(64, welcome.Height));
-        RemoteLabel = $"正在观看: {displayLabel} ({welcome.Width}x{welcome.Height}@{welcome.Fps}fps)";
+        ApplyStreamConfig(welcome.Width, welcome.Height, welcome.Fps);
         IsMuted = false;
         _audioPlayer.Muted = false;
         RemoteAllowsControl = welcome.AllowControl;
@@ -166,12 +178,7 @@ public sealed class ScreenShareClient : IAsyncDisposable
                 }
                 else if (msg.Type == "video_config" && msg.Width >= 64 && msg.Height >= 64)
                 {
-                    if (_decoder is null || _decoder.Width != msg.Width || _decoder.Height != msg.Height)
-                    {
-                        _decoder?.Dispose();
-                        _decoder = new MfH264Decoder(msg.Width, msg.Height);
-                    }
-                    RemoteLabel = $"正在观看: {_displayLabel} ({msg.Width}x{msg.Height}@{msg.Fps}fps)";
+                    ApplyStreamConfig(msg.Width, msg.Height, msg.Fps);
                     StateChanged?.Invoke();
                 }
             }
@@ -215,7 +222,8 @@ public sealed class ScreenShareClient : IAsyncDisposable
                     continue;
                 }
 
-                if (buf[2] == 0x01 && buf.Length > 19)
+                var packetCodec = VideoCodecs.FromPacketType(buf[2]);
+                if (packetCodec is not null && buf.Length > 19)
                 {
                     uint frameId = BinaryPrimitives.ReadUInt32LittleEndian(buf.AsSpan(3, 4));
                     ushort sliceIdx = BinaryPrimitives.ReadUInt16LittleEndian(buf.AsSpan(7, 2));
@@ -261,7 +269,7 @@ public sealed class ScreenShareClient : IAsyncDisposable
                                 pos += slices[i]!.Length;
                             }
                             slices = null;
-                            DecodeAndPresent(frameData, ptsUs * 10);
+                            DecodeAndPresent(packetCodec.Value, frameData, ptsUs * 10);
                         }
                     }
                 }
@@ -276,27 +284,146 @@ public sealed class ScreenShareClient : IAsyncDisposable
         }
     }
 
-    private unsafe void DecodeAndPresent(byte[] annexB, long ptsHns)
+    /// <summary>
+    /// 告诉共享端本机能解哪些格式。H.265 只在有硬件解码时声明（软解 H.265 太吃 CPU），
+    /// H.264 总是支持（没有硬件时软解）。
+    /// </summary>
+    private string[] SupportedCodecs()
     {
-        if (_decoder is null) return;
-        var nv12 = _decoder.Decode(annexB, ptsHns);
-        if (nv12 is null) return;
+        _hevcHardwareSupported ??= _renderer.SupportsDecoderProfile(D3D11DecoderProfileHevcMain) &&
+                                   MfVideoDecoder.ProbeD3D11(VideoCodec.Hevc, _renderer.DecoderDevice);
+        return _hevcHardwareSupported == true
+            ? [VideoCodecs.HevcWire, VideoCodecs.H264Wire]
+            : [VideoCodecs.H264Wire];
+    }
 
-        int w = _decoder.Width;
-        int h = _decoder.Height;
-        int needed = w * h * 4;
-        if (_bgraScratch.Length != needed)
+    private void ApplyStreamConfig(int width, int height, int fps)
+    {
+        lock (_decoderLock)
         {
-            _bgraScratch = new byte[needed];
+            if (width >= 64 && height >= 64 && (width != _streamWidth || height != _streamHeight))
+            {
+                // 尺寸变了：下一帧按新尺寸重建解码器
+                _decoder?.Dispose();
+                _decoder = null;
+            }
+            if (width >= 64) _streamWidth = width;
+            if (height >= 64) _streamHeight = height;
+            if (fps > 0) _streamFps = fps;
+        }
+        UpdateRemoteLabel();
+    }
+
+    private void UpdateRemoteLabel()
+    {
+        string suffix = string.IsNullOrEmpty(_decodeLabel) ? string.Empty : $" · {_decodeLabel}";
+        RemoteLabel = $"正在观看: {_displayLabel} ({_streamWidth}x{_streamHeight}@{_streamFps}fps{suffix})";
+    }
+
+    private void DecodeAndPresent(VideoCodec codec, byte[] annexB, long ptsHns)
+    {
+        string? newLabel = null;
+        bool needKeyFrame = false;
+        lock (_decoderLock)
+        {
+            if (_decoder is null || _decoder.Codec != codec)
+            {
+                _decoder?.Dispose();
+                _decoder = CreateDecoder(codec);
+                _framesWithoutOutput = 0;
+                if (_decoder is null)
+                {
+                    if (codec == VideoCodec.Hevc && _hevcHardwareSupported != false)
+                    {
+                        // 本机解不了 H.265：请共享端改发 H.264
+                        _hevcHardwareSupported = false;
+                        _ = SendControlMsgAsync(new ScreenShareServer.ControlMsg { Type = "codecs", Codecs = [VideoCodecs.H264Wire] });
+                    }
+                    return;
+                }
+            }
+
+            int presented;
+            try
+            {
+                presented = _decoder.Decode(annexB, ptsHns, _renderer);
+            }
+            catch
+            {
+                presented = 0;
+            }
+
+            if (presented > 0)
+            {
+                _framesWithoutOutput = 0;
+                string label = $"{VideoCodecs.DisplayName(codec)} {(_decoder.IsHardwareOutput ? "硬解" : "软解")}";
+                if (label != _decodeLabel) newLabel = label;
+            }
+            else if (++_framesWithoutOutput > MaxFramesWithoutOutput)
+            {
+                // 长时间解不出画面：硬件 H.264 换软解；H.265 告诉共享端改发 H.264
+                _framesWithoutOutput = 0;
+                if (codec == VideoCodec.H264 && _decoder.UsesD3D11)
+                {
+                    _h264HardwareFailed = true;
+                    _decoder.Dispose();
+                    _decoder = null;
+                    needKeyFrame = true;
+                }
+                else if (codec == VideoCodec.Hevc)
+                {
+                    _hevcHardwareSupported = false;
+                    _ = SendControlMsgAsync(new ScreenShareServer.ControlMsg { Type = "codecs", Codecs = [VideoCodecs.H264Wire] });
+                }
+            }
         }
 
-        fixed (byte* pNv12 = nv12)
-        fixed (byte* pBgra = _bgraScratch)
+        if (needKeyFrame)
         {
-            ColorConvert.Nv12ToBgra(pNv12, w, h, pBgra, w * 4);
+            _ = SendControlMsgAsync(new ScreenShareServer.ControlMsg { Type = "pli" });
+        }
+        if (newLabel is not null)
+        {
+            _decodeLabel = newLabel;
+            UpdateRemoteLabel();
+            StateChanged?.Invoke();
+        }
+    }
+
+    /// <summary>先尝试 D3D11 硬件解码，失败再软解；H.265 没有硬件解码时不软解。</summary>
+    private MfVideoDecoder? CreateDecoder(VideoCodec codec)
+    {
+        int w = Math.Max(64, _streamWidth);
+        int h = Math.Max(64, _streamHeight);
+        IntPtr device = _renderer.DecoderDevice;
+        bool tryHardware = device != IntPtr.Zero && (codec == VideoCodec.Hevc
+            ? _hevcHardwareSupported != false
+            : !_h264HardwareFailed && _renderer.SupportsDecoderProfile(D3D11DecoderProfileH264));
+
+        if (tryHardware)
+        {
+            try
+            {
+                return MfVideoDecoder.Create(codec, w, h, device, requireD3D11: true);
+            }
+            catch
+            {
+            }
         }
 
-        _renderer.PresentBgraFrame(_bgraScratch, w, h);
+        if (codec == VideoCodec.Hevc)
+        {
+            return null;
+        }
+
+        try
+        {
+            return MfVideoDecoder.Create(codec, w, h, IntPtr.Zero, requireD3D11: false);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private async Task SendControlMsgAsync(ScreenShareServer.ControlMsg msg)
@@ -326,8 +453,13 @@ public sealed class ScreenShareClient : IAsyncDisposable
         _udp = null;
         _tcp = null;
         _writer = null;
-        _decoder?.Dispose();
-        _decoder = null;
+        lock (_decoderLock)
+        {
+            _decoder?.Dispose();
+            _decoder = null;
+            _framesWithoutOutput = 0;
+        }
+        _decodeLabel = string.Empty;
         RemoteLabel = "未连接任何共享节点";
         _cts?.Dispose();
         _cts = null;

@@ -1,7 +1,7 @@
 {
   "id": "screen-share",
   "name": "屏幕共享",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "author": "EasyTier Extension",
   "description": "基于 EasyTier 虚拟局域网的低延迟多人屏幕共享插件，支持程序/屏幕缩略图选源、系统音频同步与远程键鼠协助",
   "icon": "🖥️",

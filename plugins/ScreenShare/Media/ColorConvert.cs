@@ -112,42 +112,4 @@ public static unsafe class ColorConvert
             }
         }
     }
-
-    public static void Nv12ToBgra(
-        byte* srcNv12,
-        int width,
-        int height,
-        byte* dstBgra,
-        int dstStride)
-    {
-        byte* yPlane = srcNv12;
-        byte* uvPlane = srcNv12 + width * height;
-
-        for (int y = 0; y < height; y++)
-        {
-            byte* yRow = yPlane + y * width;
-            byte* uvRow = uvPlane + (y / 2) * width;
-            byte* dstRow = dstBgra + y * dstStride;
-
-            for (int x = 0; x < width; x++)
-            {
-                int yy = yRow[x] - 16;
-                if (yy < 0) yy = 0;
-                int uvIdx = x & ~1;
-                int u = uvRow[uvIdx] - 128;
-                int v = uvRow[uvIdx + 1] - 128;
-
-                int c = 298 * yy;
-                int r = (c + 409 * v + 128) >> 8;
-                int g = (c - 100 * u - 208 * v + 128) >> 8;
-                int b = (c + 516 * u + 128) >> 8;
-
-                byte* px = dstRow + x * 4;
-                px[0] = (byte)Math.Clamp(b, 0, 255);
-                px[1] = (byte)Math.Clamp(g, 0, 255);
-                px[2] = (byte)Math.Clamp(r, 0, 255);
-                px[3] = 255;
-            }
-        }
-    }
 }

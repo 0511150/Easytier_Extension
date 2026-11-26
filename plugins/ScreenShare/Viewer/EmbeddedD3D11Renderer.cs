@@ -4,10 +4,11 @@ using Vortice.Direct3D;
 using Vortice.Direct3D11;
 using Vortice.DXGI;
 using Vortice.Mathematics;
+using ScreenShare.Media;
 
 namespace ScreenShare.Viewer;
 
-public sealed class EmbeddedD3D11Renderer : IDisposable
+public sealed class EmbeddedD3D11Renderer : IVideoFrameSink, IDisposable
 {
     private const uint WM_APP_RESIZE = 0x8001;
     private const uint WM_APP_SHUTDOWN = 0x8002;
@@ -31,10 +32,17 @@ VSOut VSMain(uint id : SV_VertexID) {
     o.uv  = uv[id];
     return o;
 }
-Texture2D tex0 : register(t0);
+Texture2D texY  : register(t0);
+Texture2D texUV : register(t1);
 SamplerState sam0 : register(s0);
 float4 PSMain(VSOut i) : SV_TARGET {
-    return tex0.Sample(sam0, i.uv);
+    // NV12 -> RGB，BT.601 有限范围，与发送端 BgraToNv12 一致
+    float y = (texY.Sample(sam0, i.uv).r - 16.0 / 255.0) * 1.164383;
+    float2 c = texUV.Sample(sam0, i.uv).rg - 0.5;
+    float3 rgb = float3(y + 1.596027 * c.y,
+                        y - 0.391762 * c.x - 0.812968 * c.y,
+                        y + 2.017232 * c.x);
+    return float4(saturate(rgb), 1);
 }";
 
     private readonly IntPtr _hostSlotHwnd;
@@ -60,8 +68,18 @@ float4 PSMain(VSOut i) : SV_TARGET {
     private ID3D11VertexShader? _vs;
     private ID3D11PixelShader? _ps;
     private ID3D11SamplerState? _sampler;
-    private ID3D11Texture2D? _videoTex;
-    private ID3D11ShaderResourceView? _videoSrv;
+    // 硬件解码：解码器纹理复制到这张 NV12 纹理，两个平面各一个 SRV
+    private ID3D11Texture2D? _nv12Tex;
+    private ID3D11ShaderResourceView? _nv12SrvY;
+    private ID3D11ShaderResourceView? _nv12SrvUV;
+    // 软件解码：Y / UV 两张动态纹理
+    private ID3D11Texture2D? _yTex;
+    private ID3D11Texture2D? _uvTex;
+    private ID3D11ShaderResourceView? _ySrv;
+    private ID3D11ShaderResourceView? _uvSrv;
+    private bool _lastFrameFromNv12Tex;
+    private bool _videoSupport;
+    private bool _nv12Sampleable;
     private volatile bool _disposed;
 
     private WndProcDelegate? _wndProc;
@@ -98,70 +116,175 @@ float4 PSMain(VSOut i) : SV_TARGET {
         PostMessageW(_hwnd, WM_APP_RESIZE, IntPtr.Zero, IntPtr.Zero);
     }
 
-    public unsafe void PresentBgraFrame(byte[] bgraData, int width, int height)
-    {
-        if (_disposed || _device is null || _context is null || _swapChain is null || _rtv is null) return;
+    /// <summary>供硬件解码器使用的 D3D11 设备（未启用视频支持或无法采样 NV12 时为 0）。</summary>
+    public IntPtr DecoderDevice => _videoSupport && _nv12Sampleable && _device is not null ? _device.NativePointer : IntPtr.Zero;
 
+    /// <summary>显卡是否有该 DXVA 解码配置（且能输出 NV12）。</summary>
+    public bool SupportsDecoderProfile(Guid profile)
+    {
+        if (DecoderDevice == IntPtr.Zero || _device is null) return false;
+        try
+        {
+            using var videoDevice = _device.QueryInterfaceOrNull<ID3D11VideoDevice>();
+            if (videoDevice is null) return false;
+            uint count = videoDevice.VideoDecoderProfileCount;
+            for (uint i = 0; i < count; i++)
+            {
+                videoDevice.GetVideoDecoderProfile(i, out var p).CheckError();
+                if (p != profile) continue;
+                videoDevice.CheckVideoDecoderFormat(profile, Format.NV12, out var supported).CheckError();
+                return supported;
+            }
+        }
+        catch
+        {
+        }
+        return false;
+    }
+
+    public void PresentNv12Texture(IntPtr texture, uint subresource, int width, int height)
+    {
+        if (_disposed || texture == IntPtr.Zero) return;
         lock (_renderLock)
         {
-            if (_disposed || _device is null || _context is null || _swapChain is null || _rtv is null) return;
+            if (_disposed || _device is null || _context is null) return;
+            // 这个引用归解码器所有：先 AddRef，包装对象 Dispose 时再 Release
+            Marshal.AddRef(texture);
+            using var src = new ID3D11Texture2D(texture);
+            var srcDesc = src.Description;
+            width = Math.Min(width, (int)srcDesc.Width) & ~1;
+            height = Math.Min(height, (int)srcDesc.Height) & ~1;
+            if (width <= 0 || height <= 0) return;
 
-            if (_videoTex is null || _videoW != width || _videoH != height)
+            if (_nv12Tex is null || _videoW != width || _videoH != height || !_lastFrameFromNv12Tex)
             {
-                _videoSrv?.Dispose();
-                _videoTex?.Dispose();
+                ReleaseVideoTextures();
                 _videoW = width;
                 _videoH = height;
-                _videoTex = _device.CreateTexture2D(new Texture2DDescription
+                _nv12Tex = _device.CreateTexture2D(new Texture2DDescription
                 {
                     Width = (uint)width,
                     Height = (uint)height,
                     MipLevels = 1,
                     ArraySize = 1,
-                    Format = Format.B8G8R8A8_UNorm,
+                    Format = Format.NV12,
                     SampleDescription = new SampleDescription(1, 0),
-                    Usage = ResourceUsage.Dynamic,
-                    BindFlags = BindFlags.ShaderResource,
-                    CPUAccessFlags = CpuAccessFlags.Write
+                    Usage = ResourceUsage.Default,
+                    BindFlags = BindFlags.ShaderResource
                 });
-                _videoSrv = _device.CreateShaderResourceView(_videoTex);
+                _nv12SrvY = _device.CreateShaderResourceView(_nv12Tex,
+                    new ShaderResourceViewDescription(_nv12Tex, ShaderResourceViewDimension.Texture2D, Format.R8_UNorm));
+                _nv12SrvUV = _device.CreateShaderResourceView(_nv12Tex,
+                    new ShaderResourceViewDescription(_nv12Tex, ShaderResourceViewDimension.Texture2D, Format.R8G8_UNorm));
+                _lastFrameFromNv12Tex = true;
             }
 
-            var mapped = _context.Map(_videoTex, 0, MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None);
-            try
-            {
-                int srcRowBytes = width * 4;
-                fixed (byte* pSrc = bgraData)
-                {
-                    byte* dst = (byte*)mapped.DataPointer;
-                    for (int y = 0; y < height; y++)
-                    {
-                        Buffer.MemoryCopy(pSrc + y * srcRowBytes, dst + y * (int)mapped.RowPitch, srcRowBytes, srcRowBytes);
-                    }
-                }
-            }
-            finally
-            {
-                _context.Unmap(_videoTex, 0);
-            }
-
+            _context.CopySubresourceRegion(_nv12Tex, 0, 0, 0, 0, src, subresource, new Box(0, 0, 0, width, height, 1));
             _hasVideoFrame = true;
-            _context.OMSetRenderTargets(_rtv);
-            _context.ClearRenderTargetView(_rtv, new Color4(0.05f, 0.05f, 0.06f, 1f));
+            DrawFrameLocked();
+        }
+    }
 
+    public unsafe void PresentNv12Memory(IntPtr data, int stride, int planeHeight, int width, int height)
+    {
+        if (_disposed || data == IntPtr.Zero) return;
+        lock (_renderLock)
+        {
+            if (_disposed || _device is null || _context is null) return;
+            width &= ~1;
+            height &= ~1;
+            if (width <= 0 || height <= 0) return;
+
+            if (_yTex is null || _videoW != width || _videoH != height || _lastFrameFromNv12Tex)
+            {
+                ReleaseVideoTextures();
+                _videoW = width;
+                _videoH = height;
+                _yTex = CreateDynamicTexture(width, height, Format.R8_UNorm);
+                _uvTex = CreateDynamicTexture(width / 2, height / 2, Format.R8G8_UNorm);
+                _ySrv = _device.CreateShaderResourceView(_yTex);
+                _uvSrv = _device.CreateShaderResourceView(_uvTex);
+                _lastFrameFromNv12Tex = false;
+            }
+
+            byte* src = (byte*)data;
+            UploadPlane(_yTex, src, stride, width, height);
+            UploadPlane(_uvTex!, src + (long)stride * planeHeight, stride, width, height / 2);
+            _hasVideoFrame = true;
+            DrawFrameLocked();
+        }
+    }
+
+    private ID3D11Texture2D CreateDynamicTexture(int width, int height, Format format) =>
+        _device!.CreateTexture2D(new Texture2DDescription
+        {
+            Width = (uint)width,
+            Height = (uint)height,
+            MipLevels = 1,
+            ArraySize = 1,
+            Format = format,
+            SampleDescription = new SampleDescription(1, 0),
+            Usage = ResourceUsage.Dynamic,
+            BindFlags = BindFlags.ShaderResource,
+            CPUAccessFlags = CpuAccessFlags.Write
+        });
+
+    private unsafe void UploadPlane(ID3D11Texture2D tex, byte* src, int srcStride, int rowBytes, int rows)
+    {
+        var mapped = _context!.Map(tex, 0, MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None);
+        try
+        {
+            byte* dst = (byte*)mapped.DataPointer;
+            for (int y = 0; y < rows; y++)
+            {
+                Buffer.MemoryCopy(src + (long)y * srcStride, dst + (long)y * mapped.RowPitch, rowBytes, rowBytes);
+            }
+        }
+        finally
+        {
+            _context.Unmap(tex, 0);
+        }
+    }
+
+    private void ReleaseVideoTextures()
+    {
+        _nv12SrvY?.Dispose();
+        _nv12SrvY = null;
+        _nv12SrvUV?.Dispose();
+        _nv12SrvUV = null;
+        _nv12Tex?.Dispose();
+        _nv12Tex = null;
+        _ySrv?.Dispose();
+        _ySrv = null;
+        _uvSrv?.Dispose();
+        _uvSrv = null;
+        _yTex?.Dispose();
+        _yTex = null;
+        _uvTex?.Dispose();
+        _uvTex = null;
+    }
+
+    /// <summary>在 _renderLock 内调用：有画面就按比例居中绘制，没有就清屏。</summary>
+    private void DrawFrameLocked()
+    {
+        if (_context is null || _rtv is null || _swapChain is null) return;
+        _context.OMSetRenderTargets(_rtv);
+        _context.ClearRenderTargetView(_rtv, new Color4(0.05f, 0.05f, 0.06f, 1f));
+
+        var srvY = _lastFrameFromNv12Tex ? _nv12SrvY : _ySrv;
+        var srvUV = _lastFrameFromNv12Tex ? _nv12SrvUV : _uvSrv;
+        if (_hasVideoFrame && srvY is not null && srvUV is not null)
+        {
             var (vx, vy, vw, vh) = ComputeLetterboxRect();
             _context.RSSetViewport(new Viewport(vx, vy, vw, vh, 0f, 1f));
             _context.IASetPrimitiveTopology(PrimitiveTopology.TriangleStrip);
             _context.VSSetShader(_vs);
             _context.PSSetShader(_ps);
-            if (_videoSrv is not null)
-            {
-                _context.PSSetShaderResource(0, _videoSrv);
-            }
+            _context.PSSetShaderResources(0, [srvY, srvUV]);
             _context.PSSetSampler(0, _sampler);
             _context.Draw(4, 0);
-            _swapChain.Present(0, PresentFlags.None);
         }
+        _swapChain.Present(0, PresentFlags.None);
     }
 
     private (float x, float y, float w, float h) ComputeLetterboxRect()
@@ -232,13 +355,30 @@ float4 PSMain(VSOut i) : SV_TARGET {
 
     private void InitD3D11()
     {
-        D3D11.D3D11CreateDevice(
+        // VideoSupport 是 DXVA 硬件解码的前提；个别驱动不支持时退回普通设备（软件解码）
+        _videoSupport = D3D11.D3D11CreateDevice(
             null,
             DriverType.Hardware,
-            DeviceCreationFlags.BgraSupport,
-            [FeatureLevel.Level_11_0, FeatureLevel.Level_10_0],
-            out _device).CheckError();
+            DeviceCreationFlags.BgraSupport | DeviceCreationFlags.VideoSupport,
+            [FeatureLevel.Level_11_1, FeatureLevel.Level_11_0],
+            out _device).Success;
+        if (!_videoSupport)
+        {
+            D3D11.D3D11CreateDevice(
+                null,
+                DriverType.Hardware,
+                DeviceCreationFlags.BgraSupport,
+                [FeatureLevel.Level_11_0, FeatureLevel.Level_10_0],
+                out _device).CheckError();
+        }
         _context = _device!.ImmediateContext;
+
+        // 解码器在自己的线程里用同一设备，必须开启多线程保护
+        using (var multithread = _device.QueryInterfaceOrNull<ID3D11Multithread>())
+        {
+            multithread?.SetMultithreadProtected(true);
+        }
+        _nv12Sampleable = _videoSupport && CanSampleNv12(_device);
 
         using var dxgiDevice = _device.QueryInterface<IDXGIDevice>();
         using var adapter = dxgiDevice.GetAdapter();
@@ -268,6 +408,34 @@ float4 PSMain(VSOut i) : SV_TARGET {
             _context.OMSetRenderTargets(_rtv);
             _context.ClearRenderTargetView(_rtv, new Color4(0.05f, 0.05f, 0.06f, 1f));
             _swapChain.Present(0, PresentFlags.None);
+        }
+    }
+
+    /// <summary>实际建一张 NV12 纹理和两个平面视图，成功才走硬件解码（比查格式支持位可靠）。</summary>
+    private static bool CanSampleNv12(ID3D11Device device)
+    {
+        try
+        {
+            using var tex = device.CreateTexture2D(new Texture2DDescription
+            {
+                Width = 16,
+                Height = 16,
+                MipLevels = 1,
+                ArraySize = 1,
+                Format = Format.NV12,
+                SampleDescription = new SampleDescription(1, 0),
+                Usage = ResourceUsage.Default,
+                BindFlags = BindFlags.ShaderResource
+            });
+            using var y = device.CreateShaderResourceView(tex,
+                new ShaderResourceViewDescription(tex, ShaderResourceViewDimension.Texture2D, Format.R8_UNorm));
+            using var uv = device.CreateShaderResourceView(tex,
+                new ShaderResourceViewDescription(tex, ShaderResourceViewDimension.Texture2D, Format.R8G8_UNorm));
+            return true;
+        }
+        catch
+        {
+            return false;
         }
     }
 
@@ -307,28 +475,9 @@ float4 PSMain(VSOut i) : SV_TARGET {
                 }
             }
 
-            if (vis && _context is not null && _rtv is not null && _swapChain is not null)
+            if (vis)
             {
-                if (_hasVideoFrame && _videoSrv is not null)
-                {
-                    _context.OMSetRenderTargets(_rtv);
-                    _context.ClearRenderTargetView(_rtv, new Color4(0.05f, 0.05f, 0.06f, 1f));
-                    var (vx, vy, vw, vh) = ComputeLetterboxRect();
-                    _context.RSSetViewport(new Viewport(vx, vy, vw, vh, 0f, 1f));
-                    _context.IASetPrimitiveTopology(PrimitiveTopology.TriangleStrip);
-                    _context.VSSetShader(_vs);
-                    _context.PSSetShader(_ps);
-                    _context.PSSetShaderResource(0, _videoSrv);
-                    _context.PSSetSampler(0, _sampler);
-                    _context.Draw(4, 0);
-                    _swapChain.Present(0, PresentFlags.None);
-                }
-                else
-                {
-                    _context.OMSetRenderTargets(_rtv);
-                    _context.ClearRenderTargetView(_rtv, new Color4(0.05f, 0.05f, 0.06f, 1f));
-                    _swapChain.Present(0, PresentFlags.None);
-                }
+                DrawFrameLocked();
             }
         }
     }
@@ -337,10 +486,7 @@ float4 PSMain(VSOut i) : SV_TARGET {
     {
         lock (_renderLock)
         {
-            _videoSrv?.Dispose();
-            _videoSrv = null;
-            _videoTex?.Dispose();
-            _videoTex = null;
+            ReleaseVideoTextures();
             _sampler?.Dispose();
             _sampler = null;
             _ps?.Dispose();
