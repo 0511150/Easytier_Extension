@@ -1,0 +1,14 @@
+{
+  "id": "peer-speedtest",
+  "name": "对端测速",
+  "version": "1.0.0",
+  "author": "EasyTier Extension",
+  "description": "测试 EasyTier 虚拟局域网内到其他节点的真实延迟、抖动与上下行带宽，支持多线程与测速记录",
+  "icon": "⚡",
+  "category": "网络工具",
+  "min_host_version": "1.1.0",
+  "entry": "PeerSpeedTest.exe",
+  "menus": [
+    { "id": "main", "title": "对端测速 - 测速" }
+  ]
+}

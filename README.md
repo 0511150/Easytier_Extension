@@ -39,6 +39,7 @@
 | 插件 | 简介 | 说明 |
 | --- | --- | --- |
 | 屏幕共享（`screen-share`） | 基于虚拟局域网的低延迟多人屏幕共享，支持声音同步与远程协助 | [查看](plugins/ScreenShare/README.md) |
+| 对端测速（`peer-speedtest`） | 测试到组网内其他节点的延迟、抖动与上下行带宽，支持多线程与测速记录 | [查看](plugins/PeerSpeedTest/README.md) |
 | *更多官方插件* | *敬请期待* | [官方插件源](https://github.com/0511150/Easytier_Extension_Registry) |
 
 <!-- 新增官方插件：在「更多官方插件」上方追加一行，链接指向 plugins/<插件目录>/README.md -->
@@ -79,7 +80,7 @@ dist/
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\build-dist.ps1
 ```
 
-脚本将依次执行单元测试与核心集成测试、发布主程序与复制核心二进制到 `dist/`（不预装插件或离线市场目录），并将 `ScreenShare` 插件构建到临时目录执行冒烟测试在内的全量验证。
+脚本将依次执行单元测试与核心集成测试、发布主程序与复制核心二进制到 `dist/`（不预装插件或离线市场目录），并将官方插件（`ScreenShare`、`PeerSpeedTest`）构建到临时目录执行冒烟测试在内的全量验证。
 
 ---
 

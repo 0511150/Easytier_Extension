@@ -28,7 +28,7 @@ $TempSmokeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("et_smoke_root_" +
 
 try {
     Write-Host "[1/6] Running unit & core integration tests..."
-    & $Dotnet test (Join-Path $Root "tests\EasyTierExt.Tests\EasyTierExt.Tests.csproj") -c Release -p:Platform=x64 @RestoreProps --filter "FullyQualifiedName!~PublishedScreenShareSmokeTest"
+    & $Dotnet test (Join-Path $Root "tests\EasyTierExt.Tests\EasyTierExt.Tests.csproj") -c Release -p:Platform=x64 @RestoreProps --filter "FullyQualifiedName!~Published"
     if ($LASTEXITCODE -ne 0) { throw "Tests failed!" }
 
     Write-Host "[2/6] Preserving core binaries / legacy config & cleaning dist directory..."
@@ -72,15 +72,22 @@ try {
     New-Item -ItemType Directory -Path $DistCore | Out-Null
     Copy-Item "$CoreSrc\*" $DistCore -Force
 
-    Write-Host "[5/6] Publishing ScreenShare plugin to temp smoke directory (excluded from dist)..."
-    $SmokePluginDir = Join-Path $TempSmokeRoot "plugins\screen-share"
-    New-Item -ItemType Directory -Path $SmokePluginDir -Force | Out-Null
-    & $Dotnet publish (Join-Path $Root "plugins\ScreenShare\ScreenShare.csproj") `
-        -c Release -r win-x64 -p:Platform=x64 --self-contained true -p:PublishReadyToRun=true @RestoreProps -o $SmokePluginDir
-    if ($LASTEXITCODE -ne 0) { throw "ScreenShare publish failed!" }
-    Copy-Item (Join-Path $Root "plugins\ScreenShare\manifest.json") (Join-Path $SmokePluginDir "manifest.json") -Force
+    Write-Host "[5/6] Publishing official plugins to temp smoke directory (excluded from dist)..."
+    $SmokePlugins = @(
+        @{ Id = "screen-share"; Dir = "ScreenShare" },
+        @{ Id = "peer-speedtest"; Dir = "PeerSpeedTest" }
+    )
+    foreach ($Plugin in $SmokePlugins) {
+        $SmokePluginDir = Join-Path $TempSmokeRoot ("plugins\" + $Plugin.Id)
+        $PluginSrc = Join-Path $Root ("plugins\" + $Plugin.Dir)
+        New-Item -ItemType Directory -Path $SmokePluginDir -Force | Out-Null
+        & $Dotnet publish (Join-Path $PluginSrc ($Plugin.Dir + ".csproj")) `
+            -c Release -r win-x64 -p:Platform=x64 --self-contained true -p:PublishReadyToRun=true @RestoreProps -o $SmokePluginDir
+        if ($LASTEXITCODE -ne 0) { throw ($Plugin.Dir + " publish failed!") }
+        Copy-Item (Join-Path $PluginSrc "manifest.json") (Join-Path $SmokePluginDir "manifest.json") -Force
+    }
 
-    Write-Host "[6/6] Running full test suite including published ScreenShare.exe smoke test..."
+    Write-Host "[6/6] Running full test suite including published plugin smoke tests..."
     $env:EASYTIER_SMOKE_PLUGIN_ROOT = $TempSmokeRoot
     & $Dotnet test (Join-Path $Root "tests\EasyTierExt.Tests\EasyTierExt.Tests.csproj") -c Release -p:Platform=x64 --no-build
     if ($LASTEXITCODE -ne 0) { throw "Post-publish verification tests failed!" }
